@@ -805,6 +805,47 @@ export function getPageHtml(): string {
       initializePreview(PLACEHOLDER_HTML)
 
       form.addEventListener('submit', handleSubmit)
+
+      async function fetchCaptionsClientSide(videoUrl, signal) {
+        const match = videoUrl.match(/(?:v=|youtu\\.be\\/)([a-zA-Z0-9_-]{11})/)
+        if (!match) throw new Error('Invalid URL')
+        const videoId = match[1]
+
+        const resp = await fetch('/api/captions', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ videoId }),
+          signal
+        })
+
+        if (!resp.ok) {
+          const err = await resp.json().catch(() => ({}))
+          throw new Error(err.error || 'Caption proxy failed')
+        }
+
+        const data = await resp.json()
+        const xml = data.xml || ''
+        const title = data.title || ''
+
+        // Parse XML captions
+        const textParts = []
+        const regex = /<text[^>]*>([^<]*)<\\/text>/g
+        let m
+        while ((m = regex.exec(xml)) !== null) {
+          const decoded = m[1]
+            .replace(/&amp;/g, '&')
+            .replace(/&lt;/g, '<')
+            .replace(/&gt;/g, '>')
+            .replace(/&quot;/g, '"')
+            .replace(/&#39;/g, "'")
+            .replace(/\\n/g, ' ')
+            .trim()
+          if (decoded) textParts.push(decoded)
+        }
+
+        if (!textParts.length) throw new Error('Empty captions')
+        return { transcript: textParts.join(' '), title }
+      }
       stopButton.addEventListener('click', stopGeneration)
       demoButton.addEventListener('click', () => {
         videoUrlInput.value = DEMO_URL
@@ -836,13 +877,27 @@ export function getPageHtml(): string {
         logStatus('请求已发出，等待 Worker 响应。')
         scheduleRender(PLACEHOLDER_HTML)
 
+        // Try to extract captions client-side first
+        let transcript = ''
+        let title = ''
         try {
+          logStatus('尝试从浏览器端获取字幕…')
+          const captionData = await fetchCaptionsClientSide(url, activeController.signal)
+          transcript = captionData.transcript
+          title = captionData.title
+          logStatus('浏览器端字幕提取成功。', 'success')
+        } catch (e) {
+          logStatus('浏览器端字幕提取失败，将由服务端处理。')
+        }
+
+        try {
+          const payload = { url, apiKey, transcript: transcript || undefined, title: title || undefined }
           const response = await fetch('/api/generate', {
             method: 'POST',
             headers: {
               'content-type': 'application/json'
             },
-            body: JSON.stringify({ url, apiKey }),
+            body: JSON.stringify(payload),
             signal: activeController.signal
           })
 

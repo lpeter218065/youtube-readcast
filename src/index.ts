@@ -1,5 +1,5 @@
 import { getPageHtml } from './page'
-import { buildPrompt } from './prompt'
+import { buildPrompt, buildVideoPrompt } from './prompt'
 import { streamGenerate } from './services/gemini'
 import { extractVideoId, fetchCaptions } from './services/youtube'
 import type { GenerateRequestBody } from './types'
@@ -11,7 +11,7 @@ const HTML_HEADERS = {
   'content-type': 'text/html; charset=utf-8',
   'cache-control': 'no-store',
   'content-security-policy':
-    "default-src 'self'; connect-src 'self'; frame-src 'self'; img-src 'self' data: https:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'self'"
+    "default-src 'self'; connect-src 'self' https://www.youtube.com https://noembed.com; frame-src 'self'; img-src 'self' data: https:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'self'"
 }
 
 const JSON_HEADERS = {
@@ -48,6 +48,10 @@ export default {
       return handleGenerate(request)
     }
 
+    if (request.method === 'POST' && url.pathname === '/api/captions') {
+      return handleCaptions(request)
+    }
+
     return jsonResponse({ error: 'Not Found' }, 404)
   }
 }
@@ -80,21 +84,41 @@ async function handleGenerate(request: Request): Promise<Response> {
       try {
         send('status', { message: '正在解析视频链接…' })
 
-        const captions = await fetchCaptions(videoId, {
-          signal: abortController.signal,
-          onStatus: (message) => send('status', { message })
-        })
+        let prompt: string
 
-        send('meta', {
-          title: captions.title,
-          language: captions.language,
-          source: captions.source
-        })
-        send('status', { message: '字幕已准备，开始生成中文排版稿…' })
+        // If client already extracted the transcript, use it directly
+        const clientTranscript = body?.transcript?.trim()
+        if (clientTranscript) {
+          const title = body?.title?.trim() || `YouTube Video ${videoId}`
+          send('meta', { title, language: 'en', source: 'client' })
+          send('status', { message: '字幕已准备，开始生成中文排版稿…' })
+          prompt = buildPrompt({
+            title,
+            language: 'en',
+            source: 'client',
+            segments: [{ start: 0, text: clientTranscript }]
+          })
+        } else {
+          try {
+            const captions = await fetchCaptions(videoId, {
+              signal: abortController.signal,
+              onStatus: (message) => send('status', { message })
+            })
 
-        const prompt = buildPrompt(captions)
+            send('meta', {
+              title: captions.title,
+              language: captions.language,
+              source: captions.source
+            })
+            send('status', { message: '字幕已准备，开始生成中文排版稿…' })
+            prompt = buildPrompt(captions)
+          } catch {
+            send('status', { message: '服务端字幕抓取失败，改用 Gemini 直接解析…' })
+            prompt = buildVideoPrompt(videoId)
+          }
+        }
 
-        for await (const chunk of streamGenerate(apiKey, prompt, abortController.signal)) {
+        for await (const chunk of streamGenerate({ apiKey, prompt, model: body?.model, signal: abortController.signal })) {
           send('chunk', { html: chunk })
         }
 
@@ -111,6 +135,89 @@ async function handleGenerate(request: Request): Promise<Response> {
   })
 
   return new Response(stream, { headers: STREAM_HEADERS })
+}
+
+async function handleCaptions(request: Request): Promise<Response> {
+  const body = (await safeJson(request)) as { videoId?: string } | null
+  const videoId = body?.videoId?.trim()
+
+  if (!videoId || !/^[a-zA-Z0-9_-]{11}$/.test(videoId)) {
+    return jsonResponse({ error: 'Invalid video ID' }, 400)
+  }
+
+  try {
+    // Proxy innertube player request
+    const playerResp = await fetch(
+      'https://www.youtube.com/youtubei/v1/player?prettyPrint=false',
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'user-agent':
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+        },
+        body: JSON.stringify({
+          videoId,
+          context: {
+            client: {
+              hl: 'en',
+              gl: 'US',
+              clientName: 'WEB',
+              clientVersion: '2.20241126.01.00'
+            }
+          }
+        })
+      }
+    )
+
+    if (!playerResp.ok) {
+      return jsonResponse({ error: `YouTube returned ${playerResp.status}` }, 502)
+    }
+
+    const data = (await playerResp.json()) as {
+      captions?: {
+        playerCaptionsTracklistRenderer?: {
+          captionTracks?: Array<{
+            baseUrl: string
+            languageCode?: string
+            kind?: string
+          }>
+        }
+      }
+      videoDetails?: { title?: string }
+    }
+
+    const tracks =
+      data?.captions?.playerCaptionsTracklistRenderer?.captionTracks
+
+    if (!tracks?.length) {
+      return jsonResponse({ error: 'No captions available' }, 404)
+    }
+
+    // Pick best track
+    let best = tracks[0]
+    for (const t of tracks) {
+      if (t.languageCode === 'en' && t.kind !== 'asr') { best = t; break }
+      if (t.languageCode === 'en') best = t
+    }
+
+    const captionUrl = new URL(best.baseUrl)
+    captionUrl.searchParams.set('fmt', 'srv3')
+
+    const captionResp = await fetch(captionUrl.toString())
+    if (!captionResp.ok) {
+      return jsonResponse({ error: 'Caption download failed' }, 502)
+    }
+
+    const xml = await captionResp.text()
+    const title = data?.videoDetails?.title ?? ''
+
+    return new Response(JSON.stringify({ xml, title, lang: best.languageCode ?? 'en' }), {
+      headers: JSON_HEADERS
+    })
+  } catch (err) {
+    return jsonResponse({ error: toErrorMessage(err) }, 500)
+  }
 }
 
 async function safeJson(request: Request): Promise<unknown | null> {

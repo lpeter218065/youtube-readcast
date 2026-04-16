@@ -1,5 +1,7 @@
-const GEMINI_ENDPOINT =
-  'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse'
+const GEMINI_BASE =
+  'https://generativelanguage.googleapis.com/v1beta/models/'
+
+const DEFAULT_MODEL = 'gemini-2.0-flash'
 
 const SYSTEM_INSTRUCTION = `
 你是一位顶级中文商业与科技媒体编辑，擅长把播客、访谈、圆桌和长视频字幕，重写成高度可读的中文对话文章。
@@ -25,12 +27,18 @@ const SYSTEM_INSTRUCTION = `
 5. 中文表达要自然、凝练、有编辑感，不要逐字直译。
 `.trim()
 
-export async function* streamGenerate(
-  apiKey: string,
-  prompt: string,
+export interface GeminiOptions {
+  apiKey: string
+  prompt: string
+  model?: string
   signal?: AbortSignal
-): AsyncGenerator<string> {
-  const response = await fetch(GEMINI_ENDPOINT, {
+}
+
+export async function* streamGenerate(options: GeminiOptions): AsyncGenerator<string> {
+  const { apiKey, prompt, signal, model } = options
+  const endpoint = `${GEMINI_BASE}${model || DEFAULT_MODEL}:streamGenerateContent?alt=sse`
+
+  const response = await fetch(endpoint, {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
@@ -40,15 +48,10 @@ export async function* streamGenerate(
       system_instruction: {
         parts: [{ text: SYSTEM_INSTRUCTION }]
       },
-      contents: [
-        {
-          role: 'user',
-          parts: [{ text: prompt }]
-        }
-      ],
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
       generationConfig: {
         temperature: 0.8,
-        maxOutputTokens: 8192
+        maxOutputTokens: 65536
       }
     }),
     signal

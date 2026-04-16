@@ -1,4 +1,4 @@
-export type CaptionSource = 'youtube' | 'invidious'
+export type CaptionSource = 'youtube' | 'invidious' | 'client'
 
 export interface CaptionSegment {
   start: number
@@ -15,5 +15,8 @@ export interface CaptionPayload {
 export interface GenerateRequestBody {
   url?: string
   apiKey?: string
+  transcript?: string
+  title?: string
+  model?: string
 }
 
