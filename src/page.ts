@@ -223,19 +223,25 @@ em {
 
 const APP_STYLE = `
 :root {
-  color-scheme: dark;
-  --bg: #0f1112;
-  --bg-soft: #161a1c;
-  --panel: rgba(19, 23, 24, 0.82);
-  --panel-strong: rgba(22, 27, 28, 0.96);
-  --line: rgba(255, 255, 255, 0.1);
-  --line-soft: rgba(255, 255, 255, 0.06);
-  --text: #f2eee6;
-  --muted: rgba(242, 238, 230, 0.68);
-  --accent: #e36b43;
-  --accent-soft: rgba(227, 107, 67, 0.16);
-  --success: #8fbf92;
-  --shadow: 0 30px 90px rgba(0, 0, 0, 0.34);
+  color-scheme: light;
+  --bg: #f3efe7;
+  --bg-soft: #e6ddd0;
+  --paper: rgba(255, 252, 247, 0.82);
+  --paper-strong: rgba(255, 251, 246, 0.94);
+  --ink: #181614;
+  --ink-soft: #61584d;
+  --panel: rgba(25, 27, 29, 0.94);
+  --panel-soft: rgba(35, 39, 41, 0.86);
+  --line: rgba(24, 22, 20, 0.12);
+  --line-soft: rgba(255, 255, 255, 0.09);
+  --text-on-dark: #f4efe6;
+  --muted-on-dark: rgba(244, 239, 230, 0.66);
+  --accent: #b85c38;
+  --accent-strong: #8e4428;
+  --accent-soft: rgba(184, 92, 56, 0.12);
+  --success: #7aa382;
+  --shadow: 0 28px 70px rgba(41, 31, 18, 0.12);
+  --shadow-strong: 0 42px 120px rgba(16, 17, 18, 0.22);
 }
 
 * {
@@ -247,14 +253,15 @@ body {
   margin: 0;
   min-height: 100%;
   background:
-    radial-gradient(circle at top left, rgba(227, 107, 67, 0.22), transparent 26%),
-    radial-gradient(circle at 80% 20%, rgba(138, 176, 255, 0.12), transparent 24%),
-    linear-gradient(180deg, #101314 0%, #0b0d0e 100%);
-  color: var(--text);
+    radial-gradient(circle at top left, rgba(184, 92, 56, 0.14), transparent 28%),
+    radial-gradient(circle at 88% 16%, rgba(34, 55, 76, 0.08), transparent 24%),
+    linear-gradient(180deg, #f6f2ea 0%, #efe7db 100%);
+  color: var(--ink);
 }
 
 body {
   font-family:
+    "IBM Plex Sans",
     "Avenir Next",
     "Noto Sans SC",
     "PingFang SC",
@@ -267,59 +274,123 @@ body::before {
   position: fixed;
   inset: 0;
   pointer-events: none;
-  opacity: 0.18;
+  opacity: 0.32;
   background-image:
-    linear-gradient(rgba(255, 255, 255, 0.04) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255, 255, 255, 0.04) 1px, transparent 1px);
-  background-size: 30px 30px;
-  mask-image: radial-gradient(circle at center, black 46%, transparent 100%);
+    linear-gradient(rgba(24, 22, 20, 0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(24, 22, 20, 0.03) 1px, transparent 1px);
+  background-size: 28px 28px;
+  mask-image: radial-gradient(circle at center, black 44%, transparent 100%);
 }
 
 .shell {
-  width: min(1320px, calc(100% - 32px));
-  margin: 24px auto 40px;
+  width: min(1380px, calc(100% - 40px));
+  margin: 28px auto 44px;
   display: grid;
-  grid-template-columns: minmax(320px, 420px) minmax(0, 1fr);
-  gap: 22px;
+  grid-template-columns: minmax(340px, 440px) minmax(0, 1fr);
+  gap: 24px;
 }
 
 .panel {
   position: relative;
-  border: 1px solid var(--line);
-  border-radius: 28px;
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.05), transparent 40%),
-    var(--panel);
-  backdrop-filter: blur(18px);
+  border-radius: 32px;
   box-shadow: var(--shadow);
 }
 
 .control-panel {
-  padding: 28px;
+  padding: 30px;
   overflow: hidden;
+  border: 1px solid rgba(24, 22, 20, 0.08);
+  background:
+    linear-gradient(160deg, rgba(255, 255, 255, 0.6), rgba(255, 252, 247, 0.88)),
+    var(--paper);
 }
 
 .control-panel::after {
   content: "";
   position: absolute;
-  width: 280px;
-  height: 280px;
+  width: 320px;
+  height: 320px;
   border-radius: 999px;
-  right: -110px;
-  top: -120px;
-  background: radial-gradient(circle, rgba(227, 107, 67, 0.22), transparent 70%);
+  right: -120px;
+  top: -150px;
+  background: radial-gradient(circle, rgba(184, 92, 56, 0.16), transparent 70%);
   pointer-events: none;
 }
 
 .preview-panel {
-  padding: 14px;
-  min-height: min(86vh, 960px);
+  padding: 18px;
+  min-height: min(88vh, 980px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background:
+    radial-gradient(circle at top right, rgba(184, 92, 56, 0.12), transparent 28%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.04), transparent 24%),
+    var(--panel);
+  box-shadow: var(--shadow-strong);
+}
+
+.topline {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 28px;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.brand-mark {
+  width: 42px;
+  height: 42px;
+  border-radius: 14px;
+  display: grid;
+  place-items: center;
+  background: linear-gradient(135deg, #1f2427 0%, #40484d 100%);
+  color: #fff7ee;
+  font-family:
+    "Iowan Old Style",
+    "Palatino Linotype",
+    "Noto Serif SC",
+    "Songti SC",
+    serif;
+  font-size: 19px;
+  font-weight: 700;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.16);
+}
+
+.brand-copy strong,
+.brand-copy span {
+  display: block;
+}
+
+.brand-copy strong {
+  font-size: 14px;
+  letter-spacing: 0.02em;
+}
+
+.brand-copy span {
+  margin-top: 3px;
+  color: var(--ink-soft);
+  font-size: 12px;
+}
+
+.topline-badge {
+  border-radius: 999px;
+  padding: 10px 14px;
+  background: rgba(255, 255, 255, 0.56);
+  border: 1px solid rgba(24, 22, 20, 0.08);
+  color: var(--ink-soft);
+  font-size: 12px;
+  white-space: nowrap;
 }
 
 .kicker {
-  margin: 0 0 18px;
-  color: var(--accent);
-  letter-spacing: 0.22em;
+  margin: 0 0 14px;
+  color: var(--accent-strong);
+  letter-spacing: 0.24em;
   text-transform: uppercase;
   font-size: 12px;
   font-weight: 700;
@@ -338,39 +409,99 @@ body::before {
     "Noto Serif SC",
     "Songti SC",
     serif;
-  font-size: clamp(40px, 4vw, 68px);
-  line-height: 0.98;
+  font-size: clamp(42px, 4vw, 72px);
+  line-height: 0.94;
   letter-spacing: -0.04em;
   text-wrap: balance;
+  max-width: 10.5ch;
 }
 
 .hero p {
   margin: 18px 0 0;
-  color: var(--muted);
+  color: var(--ink-soft);
   font-size: 16px;
-  line-height: 1.85;
-  max-width: 34rem;
+  line-height: 1.9;
+  max-width: 36rem;
 }
 
 .capsules {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
-  margin: 22px 0 28px;
+  margin: 24px 0 30px;
 }
 
 .capsules span {
-  border: 1px solid var(--line);
+  border: 1px solid rgba(24, 22, 20, 0.08);
   border-radius: 999px;
-  padding: 9px 12px;
+  padding: 10px 13px;
   font-size: 12px;
-  color: rgba(242, 238, 230, 0.8);
-  background: rgba(255, 255, 255, 0.03);
+  color: #473e34;
+  background: rgba(255, 255, 255, 0.54);
+}
+
+.insight-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 28px;
+}
+
+.insight-card {
+  padding: 16px;
+  border-radius: 22px;
+  background: rgba(255, 255, 255, 0.58);
+  border: 1px solid rgba(24, 22, 20, 0.07);
+}
+
+.insight-card strong,
+.insight-card span {
+  display: block;
+}
+
+.insight-card strong {
+  font-family:
+    "Iowan Old Style",
+    "Palatino Linotype",
+    "Noto Serif SC",
+    "Songti SC",
+    serif;
+  font-size: 26px;
+  line-height: 1;
+}
+
+.insight-card span {
+  margin-top: 8px;
+  color: var(--ink-soft);
+  font-size: 12px;
+  line-height: 1.6;
 }
 
 .composer {
   display: grid;
-  gap: 16px;
+  gap: 18px;
+  padding: 22px;
+  border-radius: 28px;
+  background: rgba(253, 249, 243, 0.9);
+  border: 1px solid rgba(24, 22, 20, 0.08);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.7);
+}
+
+.section-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 2px;
+}
+
+.section-label strong {
+  font-size: 15px;
+}
+
+.section-label span {
+  color: var(--ink-soft);
+  font-size: 12px;
 }
 
 .field {
@@ -382,32 +513,34 @@ body::before {
   font-size: 12px;
   letter-spacing: 0.14em;
   text-transform: uppercase;
-  color: rgba(242, 238, 230, 0.72);
+  color: #655b4f;
 }
 
 .field input {
   width: 100%;
-  border: 1px solid var(--line);
+  border: 1px solid rgba(24, 22, 20, 0.12);
   border-radius: 18px;
   padding: 16px 18px;
-  color: var(--text);
-  background: rgba(255, 255, 255, 0.04);
+  color: var(--ink);
+  background: rgba(255, 255, 255, 0.82);
   outline: none;
   font-size: 15px;
   transition:
     border-color 160ms ease,
     transform 160ms ease,
-    background 160ms ease;
+    background 160ms ease,
+    box-shadow 160ms ease;
 }
 
 .field input:focus {
-  border-color: rgba(227, 107, 67, 0.64);
-  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(184, 92, 56, 0.52);
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 0 0 4px rgba(184, 92, 56, 0.1);
   transform: translateY(-1px);
 }
 
 .field small {
-  color: var(--muted);
+  color: var(--ink-soft);
   line-height: 1.7;
 }
 
@@ -439,38 +572,39 @@ button:disabled {
 }
 
 .primary {
-  min-width: 144px;
+  min-width: 160px;
   border-radius: 999px;
-  padding: 14px 18px;
-  background: linear-gradient(135deg, #f19873 0%, #d65d39 100%);
-  color: #20140f;
+  padding: 14px 20px;
+  background: linear-gradient(135deg, #d16f47 0%, #ab4e2d 100%);
+  color: #fff7ef;
   font-weight: 800;
   letter-spacing: 0.03em;
+  box-shadow: 0 14px 30px rgba(171, 78, 45, 0.24);
 }
 
 .ghost {
   border-radius: 999px;
   padding: 14px 18px;
-  background: rgba(255, 255, 255, 0.05);
-  color: var(--text);
-  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.72);
+  color: var(--ink);
+  border: 1px solid rgba(24, 22, 20, 0.1);
 }
 
 .meta-note {
-  margin: 14px 0 0;
-  color: var(--muted);
+  margin: 10px 0 0;
+  color: var(--ink-soft);
   font-size: 13px;
-  line-height: 1.7;
+  line-height: 1.75;
 }
 
 .status-card {
-  margin-top: 24px;
-  padding: 18px;
-  border-radius: 22px;
-  border: 1px solid var(--line);
+  margin-top: 18px;
+  padding: 22px;
+  border-radius: 28px;
+  border: 1px solid rgba(24, 22, 20, 0.08);
   background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.03), transparent 100%),
-    var(--panel-strong);
+    linear-gradient(180deg, rgba(255, 255, 255, 0.52), transparent 100%),
+    var(--paper-strong);
 }
 
 .status-head {
@@ -484,7 +618,7 @@ button:disabled {
   font-size: 13px;
   letter-spacing: 0.14em;
   text-transform: uppercase;
-  color: rgba(242, 238, 230, 0.76);
+  color: #63584d;
 }
 
 .status-pill {
@@ -493,10 +627,10 @@ button:disabled {
   gap: 8px;
   padding: 8px 11px;
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid var(--line-soft);
+  background: rgba(255, 255, 255, 0.8);
+  border: 1px solid rgba(24, 22, 20, 0.08);
   font-size: 12px;
-  color: rgba(242, 238, 230, 0.78);
+  color: #554c42;
 }
 
 .status-pill::before {
@@ -515,13 +649,13 @@ body[data-state="running"] .status-pill::before {
 
 .status-copy {
   margin: 14px 0 0;
-  color: var(--text);
+  color: var(--ink);
   line-height: 1.8;
 }
 
 .status-meta {
   margin: 10px 0 0;
-  color: var(--muted);
+  color: var(--ink-soft);
   font-size: 13px;
   line-height: 1.7;
 }
@@ -542,12 +676,12 @@ body[data-state="running"] .status-pill::before {
     "Monaco",
     monospace;
   font-size: 12px;
-  color: rgba(242, 238, 230, 0.82);
+  color: #3d352c;
   line-height: 1.65;
   padding: 10px 12px;
   border-radius: 14px;
-  border: 1px solid var(--line-soft);
-  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(24, 22, 20, 0.08);
+  background: rgba(255, 255, 255, 0.62);
 }
 
 .status-log li.error {
@@ -564,23 +698,27 @@ body[data-state="running"] .status-pill::before {
 
 .preview-shell {
   height: 100%;
-  min-height: calc(min(86vh, 960px) - 28px);
-  border-radius: 22px;
+  min-height: calc(min(88vh, 980px) - 36px);
+  border-radius: 26px;
   overflow: hidden;
-  border: 1px solid var(--line);
+  border: 1px solid var(--line-soft);
   background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.04), transparent 34%),
-    rgba(6, 8, 9, 0.76);
+    linear-gradient(180deg, rgba(255, 255, 255, 0.05), transparent 30%),
+    var(--panel-soft);
 }
 
 .preview-topbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   gap: 14px;
-  padding: 14px 16px;
+  padding: 16px 18px;
   border-bottom: 1px solid var(--line-soft);
   background: rgba(255, 255, 255, 0.03);
+}
+
+.preview-heading {
+  display: grid;
+  gap: 6px;
 }
 
 .preview-label {
@@ -590,7 +728,7 @@ body[data-state="running"] .status-pill::before {
   font-size: 12px;
   letter-spacing: 0.14em;
   text-transform: uppercase;
-  color: rgba(242, 238, 230, 0.74);
+  color: rgba(244, 239, 230, 0.72);
 }
 
 .preview-label::before {
@@ -603,14 +741,36 @@ body[data-state="running"] .status-pill::before {
 }
 
 .preview-note {
-  color: var(--muted);
+  color: var(--muted-on-dark);
+  font-size: 13px;
+}
+
+.preview-subnote {
+  color: rgba(244, 239, 230, 0.88);
+  font-size: 14px;
+  line-height: 1.7;
+}
+
+.preview-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  align-self: start;
+}
+
+.preview-chip {
+  border-radius: 999px;
+  padding: 8px 12px;
   font-size: 12px;
+  color: rgba(244, 239, 230, 0.9);
+  border: 1px solid var(--line-soft);
+  background: rgba(255, 255, 255, 0.04);
 }
 
 .preview-frame {
   width: 100%;
-  height: calc(100% - 56px);
-  min-height: 680px;
+  height: calc(100% - 86px);
+  min-height: 700px;
   border: 0;
   background: transparent;
 }
@@ -632,6 +792,10 @@ body[data-state="running"] .status-pill::before {
     grid-template-columns: 1fr;
   }
 
+  .insight-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
   .preview-panel {
     min-height: 760px;
   }
@@ -639,7 +803,7 @@ body[data-state="running"] .status-pill::before {
 
 @media (max-width: 720px) {
   .shell {
-    width: min(100% - 16px, 1320px);
+    width: min(100% - 16px, 1380px);
     margin-top: 12px;
     gap: 14px;
   }
@@ -648,13 +812,30 @@ body[data-state="running"] .status-pill::before {
     padding: 20px;
   }
 
+  .topline {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
   .hero h1 {
     font-size: clamp(34px, 10vw, 52px);
+  }
+
+  .insight-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .composer {
+    padding: 18px;
   }
 
   .preview-panel {
     padding: 10px;
     min-height: 680px;
+  }
+
+  .preview-topbar {
+    grid-template-columns: 1fr;
   }
 
   .preview-frame {
@@ -666,20 +847,20 @@ body[data-state="running"] .status-pill::before {
 const PLACEHOLDER_HTML = `
 <article class="dialogue-article placeholder">
   <header class="article-head">
-    <p class="eyebrow">对话重构</p>
-    <h1>输入一个带字幕的 YouTube 链接，右侧会实时长出一篇中文文章。</h1>
-    <p class="dek">Worker 会先抓取字幕，再把文本送入 Gemini 生成 HTML。生成中的每一段内容，都会持续流到这个阅读稿纸里。</p>
+    <p class="eyebrow">Editorial Preview</p>
+    <h1>输入一个带字幕的 YouTube 链接，右侧会生成一篇更像杂志特稿的中文整理稿。</h1>
+    <p class="dek">系统会先提取字幕，再把原始对话重组成有标题、章节、重点引语与段落节奏的阅读页面。这里会在生成过程中持续刷新。</p>
   </header>
   <section class="chapter">
     <h2>你会得到什么</h2>
-    <p class="summary">不是字幕列表，也不是生硬翻译，而是一篇按主题重组后的对谈整理稿。</p>
+    <p class="summary">不是逐行字幕，也不是机械直译，而是一篇经过结构化编辑后的中文长文预览。</p>
     <div class="turn">
-      <span class="speaker">系统</span>
-      <p>章节、标题、人物称谓、重点引语和段落节奏，都会由模型根据字幕语义自动整理。</p>
+      <span class="speaker">结构</span>
+      <p>模型会根据语义自动整理章节、标题、人物称谓与重点论点，让内容更接近一篇真正可以阅读的文章。</p>
     </div>
     <div class="turn">
-      <span class="speaker">建议</span>
-      <p>可以先试用示例视频链接，再替换成你自己的视频。只要字幕可获取，就能开始流式生成。</p>
+      <span class="speaker">流程</span>
+      <p>左侧输入链接和 API Key 后，右侧会一边接收流式 HTML，一边实时渲染排版结果，方便你立刻判断成稿质量。</p>
     </div>
   </section>
 </article>
@@ -700,19 +881,50 @@ export function getPageHtml(): string {
   <body data-state="idle">
     <main class="shell">
       <section class="panel control-panel">
+        <div class="topline">
+          <div class="brand">
+            <div class="brand-mark">YR</div>
+            <div class="brand-copy">
+              <strong>YouTube Readcast</strong>
+              <span>Dialogue-to-article studio for Chinese editorial output</span>
+            </div>
+          </div>
+          <div class="topline-badge">Professional Reading Layout</div>
+        </div>
+
         <div class="hero">
-          <p class="kicker">字幕重构实验室</p>
-          <h1>把 YouTube 对话<br />整理成一篇能读的中文文章</h1>
-          <p>输入一个有字幕的视频链接，Worker 会抓取字幕，调用 Gemini AI Studio 免费 API，并把中文 HTML 排版以流的方式一段段渲染出来。</p>
+          <p class="kicker">Editorial Workflow</p>
+          <h1>把视频对话整理成一篇专业、清晰、可发布感的中文阅读稿</h1>
+          <p>输入一个有字幕的 YouTube 视频链接，系统会抓取字幕、交给 Gemini 进行结构化改写，并把阅读版 HTML 以流式方式实时渲染出来。整个界面现在更像一个真正的内容工作台，而不是临时演示页。</p>
           <div class="capsules">
             <span>Cloudflare Worker</span>
             <span>Gemini 2.5 Flash</span>
             <span>HTML 流式输出</span>
-            <span>对话稿重构</span>
+            <span>编辑级排版预览</span>
+          </div>
+        </div>
+
+        <div class="insight-grid" aria-hidden="true">
+          <div class="insight-card">
+            <strong>01</strong>
+            <span>抓取字幕并清洗成可用语料</span>
+          </div>
+          <div class="insight-card">
+            <strong>02</strong>
+            <span>重写成章节化中文文章</span>
+          </div>
+          <div class="insight-card">
+            <strong>03</strong>
+            <span>实时落入右侧阅读排版窗口</span>
           </div>
         </div>
 
         <form id="composer" class="composer">
+          <div class="section-label">
+            <strong>Start A New Conversion</strong>
+            <span>输入必要信息后立即开始</span>
+          </div>
+
           <div class="field">
             <label for="videoUrl">YouTube 链接</label>
             <input
@@ -744,7 +956,7 @@ export function getPageHtml(): string {
             <button id="demoButton" class="ghost" type="button">填入示例视频</button>
           </div>
 
-          <p class="meta-note">推荐先使用示例视频体验整体效果，再替换成你自己的链接。长视频会自动截取前部核心字幕，避免上下文过长。</p>
+          <p class="meta-note">推荐先使用示例视频检查生成风格，再替换成你自己的链接。长视频会优先整理核心字幕片段，减少上下文过长导致的噪声。</p>
         </form>
 
         <section class="status-card" aria-live="polite">
@@ -753,7 +965,7 @@ export function getPageHtml(): string {
             <div id="statusPill" class="status-pill">待命</div>
           </div>
           <p id="statusCopy" class="status-copy">等待输入视频链接和 Gemini API Key。</p>
-          <p id="statusMeta" class="status-meta">页面会在右侧实时生成排版稿，越早开始就越早看到内容长出来。</p>
+          <p id="statusMeta" class="status-meta">右侧会持续刷新阅读稿预览，所以你不需要等到任务结束才判断结果是否合适。</p>
           <ul id="statusLog" class="status-log"></ul>
         </section>
       </section>
@@ -761,8 +973,14 @@ export function getPageHtml(): string {
       <section class="panel preview-panel">
         <div class="preview-shell">
           <div class="preview-topbar">
-            <div class="preview-label">Live Reading Layout</div>
-            <div id="previewNote" class="preview-note">等待开始</div>
+            <div class="preview-heading">
+              <div class="preview-label">Live Reading Layout</div>
+              <div class="preview-subnote">右侧始终展示当前最新的中文编辑稿视图。</div>
+            </div>
+            <div class="preview-meta">
+              <div class="preview-chip">Streaming Preview</div>
+              <div id="previewNote" class="preview-note">等待开始</div>
+            </div>
           </div>
           <iframe
             id="previewFrame"
