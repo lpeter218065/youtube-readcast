@@ -848,19 +848,19 @@ const PLACEHOLDER_HTML = `
 <article class="dialogue-article placeholder">
   <header class="article-head">
     <p class="eyebrow">Editorial Preview</p>
-    <h1>输入一个带字幕的 YouTube 链接，右侧会生成一篇更像杂志特稿的中文整理稿。</h1>
-    <p class="dek">系统会先提取字幕，再把原始对话重组成有标题、章节、重点引语与段落节奏的阅读页面。这里会在生成过程中持续刷新。</p>
+    <h1>输入 YouTube 链接，右侧实时生成中文整理稿。</h1>
+    <p class="dek">字幕会被整理成更适合阅读的文章版式，并持续刷新在这里。</p>
   </header>
   <section class="chapter">
     <h2>你会得到什么</h2>
-    <p class="summary">不是逐行字幕，也不是机械直译，而是一篇经过结构化编辑后的中文长文预览。</p>
+    <p class="summary">不是字幕列表，而是一篇结构清晰的中文阅读稿。</p>
     <div class="turn">
       <span class="speaker">结构</span>
-      <p>模型会根据语义自动整理章节、标题、人物称谓与重点论点，让内容更接近一篇真正可以阅读的文章。</p>
+      <p>自动整理标题、章节和重点内容。</p>
     </div>
     <div class="turn">
       <span class="speaker">流程</span>
-      <p>左侧输入链接和 API Key 后，右侧会一边接收流式 HTML，一边实时渲染排版结果，方便你立刻判断成稿质量。</p>
+      <p>左侧提交后，右侧会实时更新排版结果。</p>
     </div>
   </section>
 </article>
@@ -886,16 +886,16 @@ export function getPageHtml(): string {
             <div class="brand-mark">YR</div>
             <div class="brand-copy">
               <strong>YouTube Readcast</strong>
-              <span>Dialogue-to-article studio for Chinese editorial output</span>
+              <span>Video to readable Chinese article</span>
             </div>
           </div>
-          <div class="topline-badge">Professional Reading Layout</div>
+          <div class="topline-badge">Reading Layout</div>
         </div>
 
         <div class="hero">
-          <p class="kicker">Editorial Workflow</p>
-          <h1>把视频对话整理成一篇专业、清晰、可发布感的中文阅读稿</h1>
-          <p>输入一个有字幕的 YouTube 视频链接，系统会抓取字幕、交给 Gemini 进行结构化改写，并把阅读版 HTML 以流式方式实时渲染出来。整个界面现在更像一个真正的内容工作台，而不是临时演示页。</p>
+          <p class="kicker">Readcast</p>
+          <h1>把视频对话整理成一篇清晰的中文阅读稿</h1>
+          <p>输入视频链接，系统会抓取字幕并实时生成文章版 HTML。</p>
           <div class="capsules">
             <span>Cloudflare Worker</span>
             <span>Gemini 2.5 Flash</span>
@@ -907,22 +907,22 @@ export function getPageHtml(): string {
         <div class="insight-grid" aria-hidden="true">
           <div class="insight-card">
             <strong>01</strong>
-            <span>抓取字幕并清洗成可用语料</span>
+            <span>提取字幕</span>
           </div>
           <div class="insight-card">
             <strong>02</strong>
-            <span>重写成章节化中文文章</span>
+            <span>整理成文</span>
           </div>
           <div class="insight-card">
             <strong>03</strong>
-            <span>实时落入右侧阅读排版窗口</span>
+            <span>实时预览</span>
           </div>
         </div>
 
         <form id="composer" class="composer">
           <div class="section-label">
-            <strong>Start A New Conversion</strong>
-            <span>输入必要信息后立即开始</span>
+            <strong>New Conversion</strong>
+            <span>填写后开始</span>
           </div>
 
           <div class="field">
@@ -934,7 +934,7 @@ export function getPageHtml(): string {
               placeholder="https://www.youtube.com/watch?v=xRh2sVcNXQ8"
               required
             />
-            <small>支持 <code>youtube.com/watch?v=</code>、<code>youtu.be/</code>、<code>/shorts/</code>、<code>/embed/</code> 等常见格式。</small>
+            <small>支持常见 YouTube 链接格式。</small>
           </div>
 
           <div class="field">
@@ -947,7 +947,7 @@ export function getPageHtml(): string {
               autocomplete="off"
               required
             />
-            <small>密钥只会保存在当前浏览器本地，并通过本应用转发到 Gemini API，不写入 Worker 环境变量。</small>
+            <small>仅保存在当前浏览器。</small>
           </div>
 
           <div class="actions">
@@ -956,7 +956,7 @@ export function getPageHtml(): string {
             <button id="demoButton" class="ghost" type="button">填入示例视频</button>
           </div>
 
-          <p class="meta-note">推荐先使用示例视频检查生成风格，再替换成你自己的链接。长视频会优先整理核心字幕片段，减少上下文过长导致的噪声。</p>
+          <p class="meta-note">可先用示例视频快速体验。</p>
         </form>
 
         <section class="status-card" aria-live="polite">
@@ -964,8 +964,8 @@ export function getPageHtml(): string {
             <div class="status-title">Generation Status</div>
             <div id="statusPill" class="status-pill">待命</div>
           </div>
-          <p id="statusCopy" class="status-copy">等待输入视频链接和 Gemini API Key。</p>
-          <p id="statusMeta" class="status-meta">右侧会持续刷新阅读稿预览，所以你不需要等到任务结束才判断结果是否合适。</p>
+          <p id="statusCopy" class="status-copy">等待开始。</p>
+          <p id="statusMeta" class="status-meta">生成过程中会实时刷新预览。</p>
           <ul id="statusLog" class="status-log"></ul>
         </section>
       </section>
@@ -975,10 +975,10 @@ export function getPageHtml(): string {
           <div class="preview-topbar">
             <div class="preview-heading">
               <div class="preview-label">Live Reading Layout</div>
-              <div class="preview-subnote">右侧始终展示当前最新的中文编辑稿视图。</div>
+              <div class="preview-subnote">实时预览当前结果。</div>
             </div>
             <div class="preview-meta">
-              <div class="preview-chip">Streaming Preview</div>
+              <div class="preview-chip">Preview</div>
               <div id="previewNote" class="preview-note">等待开始</div>
             </div>
           </div>
