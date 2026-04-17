@@ -1129,7 +1129,8 @@ export function getPageHtml(): string {
           captions = await fetchCaptionsClientSide(url, activeController.signal)
           logStatus('浏览器端字幕预取成功。', 'success')
         } catch (e) {
-          logStatus('浏览器端字幕提取失败，将由服务端处理。')
+          const message = e instanceof Error ? e.message : '未知错误'
+          logStatus('浏览器端字幕提取失败：' + message + '，将由服务端处理。')
         }
 
         try {

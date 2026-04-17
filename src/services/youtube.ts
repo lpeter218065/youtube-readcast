@@ -194,8 +194,17 @@ interface InnertubePlayerResponse {
   }
 }
 
+interface InnertubeClientConfig {
+  clientName: 'WEB' | 'WEB_EMBEDDED_PLAYER'
+  clientVersion: string
+  thirdParty?: {
+    embedUrl: string
+  }
+}
+
 async function fetchInnertubePlayer(
   videoId: string,
+  client: InnertubeClientConfig,
   parentSignal?: AbortSignal
 ): Promise<InnertubePlayerResponse> {
   const requestState = createTimedSignal(parentSignal, WATCH_TIMEOUT_MS)
@@ -215,12 +224,10 @@ async function fetchInnertubePlayer(
             client: {
               hl: 'en',
               gl: 'US',
-              clientName: 'WEB_EMBEDDED_PLAYER',
-              clientVersion: '1.20241126.01.00'
+              clientName: client.clientName,
+              clientVersion: client.clientVersion
             },
-            thirdParty: {
-              embedUrl: 'https://www.youtube.com/'
-            }
+            ...(client.thirdParty ? { thirdParty: client.thirdParty } : {})
           },
           contentCheckOk: true,
           racyCheckOk: true
@@ -245,6 +252,7 @@ async function fetchInvidiousCaptions(
   directError: unknown
 ): Promise<CaptionPayload> {
   let lastError = directError
+  const instanceErrors: string[] = []
 
   for (const instance of INVIDIOUS_INSTANCES) {
     options.onStatus?.(`尝试备用实例 ${new URL(instance).hostname}…`)
@@ -259,7 +267,7 @@ async function fetchInvidiousCaptions(
         ? selectCaptionTrack(captionsData.captions)
         : null
 
-      if (!track?.label) {
+      if (!track || (!track.label && !track.languageCode && !track.url)) {
         throw new Error('没有找到可用字幕')
       }
 
@@ -292,11 +300,12 @@ async function fetchInvidiousCaptions(
       }
     } catch (error) {
       lastError = error
+      instanceErrors.push(`${new URL(instance).hostname}: ${toErrorMessage(error)}`)
     }
   }
 
   throw new Error(
-    `字幕抓取失败。直连错误：${toErrorMessage(directError)}；备用源错误：${toErrorMessage(lastError)}`
+    `字幕抓取失败。直连错误：${toErrorMessage(directError)}；备用源错误：${instanceErrors.length ? instanceErrors.join('；') : toErrorMessage(lastError)}`
   )
 }
 
@@ -306,20 +315,36 @@ async function discoverYouTubeCaptionState(
 ): Promise<{ title: string | null; tracks: YouTubeTrack[] }> {
   let lastError: unknown = null
 
-  try {
-    const player = await fetchInnertubePlayer(videoId, parentSignal)
-    const tracks = extractCaptionTracks(player)
-
-    if (tracks.length) {
-      return {
-        title: player.videoDetails?.title ?? null,
-        tracks
+  const clients: InnertubeClientConfig[] = [
+    {
+      clientName: 'WEB',
+      clientVersion: '2.20241126.01.00'
+    },
+    {
+      clientName: 'WEB_EMBEDDED_PLAYER',
+      clientVersion: '1.20241126.01.00',
+      thirdParty: {
+        embedUrl: 'https://www.youtube.com/'
       }
     }
+  ]
 
-    lastError = new Error('Innertube 没有返回字幕轨')
-  } catch (error) {
-    lastError = error
+  for (const client of clients) {
+    try {
+      const player = await fetchInnertubePlayer(videoId, client, parentSignal)
+      const tracks = extractCaptionTracks(player)
+
+      if (tracks.length) {
+        return {
+          title: player.videoDetails?.title ?? null,
+          tracks
+        }
+      }
+
+      lastError = new Error(`Innertube ${client.clientName} 没有返回字幕轨`)
+    } catch (error) {
+      lastError = error
+    }
   }
 
   try {

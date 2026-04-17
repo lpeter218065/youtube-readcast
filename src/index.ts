@@ -122,8 +122,10 @@ async function handleGenerate(request: Request): Promise<Response> {
             })
             send('status', { message: '字幕已准备，开始生成中文排版稿…' })
             prompt = buildPrompt(captions)
-          } catch {
-            send('status', { message: '服务端字幕抓取失败，改用 Gemini 直接解析…' })
+          } catch (error) {
+            send('status', {
+              message: `服务端字幕抓取失败：${toErrorMessage(error)}；改用 Gemini 直接解析…`
+            })
             prompt = buildVideoPrompt(videoId)
           }
         }
