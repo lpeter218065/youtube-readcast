@@ -1,169 +1,170 @@
-# YouTube Dialogue Article Generator
+# YouTube Readcast Design
 
 ## Overview
 
-A Cloudflare Worker that takes a YouTube video URL, extracts its subtitles, and uses Gemini AI to generate a beautifully formatted Chinese dialogue article, streamed in real-time to the browser.
+YouTube Readcast is a Cloudflare Worker app that turns a YouTube video with captions into a Chinese reading-style article. The browser streams the final article preview, while the Worker handles subtitle discovery, fallbacks, and Gemini generation.
 
-## Architecture
+The current design borrows subtitle ideas from `/Users/xu/projects/kiss-translator`, but adapts them for a standalone web app rather than a browser extension.
 
-```
+## Why We Did Not Copy `kiss-translator` Directly
+
+`kiss-translator` runs inside `youtube.com` as an extension. That gives it two important advantages:
+
+1. It can read the YouTube page directly and fetch `/watch` without cross-origin restrictions.
+2. It can inject code into the page and intercept the site's own `timedtext` XHR traffic.
+
+This project does not run inside YouTube. It runs on its own origin (`workers.dev` / custom domain), so a "pure frontend" YouTube strategy is not reliable here because:
+
+1. The browser is cross-origin to `youtube.com`.
+2. Direct page fetches and request interception are not available.
+3. Subtitle access still needs a proxy/fallback layer to survive CORS and anti-bot failures.
+
+So the right adaptation is:
+
+1. Keep the browser as the orchestrator when possible.
+2. Keep subtitle fetching/proxying in the Worker.
+3. Reuse the better subtitle-track discovery and event parsing ideas from `kiss-translator`.
+
+## What We Borrowed From `kiss-translator`
+
+The current implementation reuses the spirit of its YouTube flow:
+
+1. Discover subtitle tracks from YouTube player metadata instead of relying only on a single legacy endpoint.
+2. Prefer `captionTracks[].baseUrl` and request `fmt=json3`.
+3. Convert `json3 events` into cleaner sentence-like segments before prompting Gemini.
+4. Keep fallback logic for weaker/older subtitle endpoints.
+
+## Current Architecture
+
+```text
 Browser (SPA)
-    │
-    ├── GET /           → Serve inline HTML page
-    └── POST /api/generate  → SSE stream
-            │
-            ├── 1. Extract video ID from URL
-            ├── 2. Fetch captions (YouTube direct → Invidious fallback)
-            ├── 3. Stream to Gemini 2.0 Flash with dialogue prompt
-            └── 4. Pipe SSE chunks back to client
+  ├── GET /                  -> inline app shell
+  ├── POST /api/captions     -> fetch structured captions first
+  └── POST /api/generate     -> SSE article stream
+                                ├── use browser-prepared captions when available
+                                ├── otherwise fetch captions in Worker
+                                └── fall back to Gemini video prompt if captions fail
 ```
 
-## File Structure
+More detailed flow:
 
+```text
+1. User submits YouTube URL + Gemini API key
+2. Browser extracts videoId locally
+3. Browser calls POST /api/captions
+4. Worker fetches captions with this order:
+   a. YouTube player metadata / captionTracks
+   b. captionTrack.baseUrl + fmt=json3
+   c. legacy timedtext list + srv3 XML
+   d. Invidious instances
+5. Browser sends structured CaptionPayload to POST /api/generate
+6. Worker builds Gemini prompt from that payload
+7. Worker streams generated HTML back over SSE
+8. Browser renders the article incrementally in the preview iframe
 ```
-yt-dialogue-generator/
-├── src/
-│   ├── index.ts                 # Worker entry, router (GET / + POST /api/generate)
-│   ├── services/
-│   │   ├── youtube.ts           # extractVideoId(), fetchCaptions()
-│   │   └── gemini.ts            # streamGenerate() → ReadableStream
-│   ├── prompt.ts                # buildPrompt(title, captions) → string
-│   └── page.ts                  # getPageHTML() → inline SPA string
-├── wrangler.toml
-├── package.json
-└── tsconfig.json
-```
 
-## Module Specifications
+## Caption Strategy
 
-### `src/index.ts` — Router (~30 lines)
+### Primary path: YouTube caption tracks
 
-```ts
-export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
-    const url = new URL(request.url)
-    if (request.method === 'GET' && url.pathname === '/') return servePage()
-    if (request.method === 'POST' && url.pathname === '/api/generate') return handleGenerate(request)
-    return new Response('Not Found', { status: 404 })
-  }
+Implemented in [src/services/youtube.ts](/Users/xu/projects/youtube-readcast/src/services/youtube.ts).
+
+The Worker first tries to discover `captionTracks` using:
+
+1. `youtubei/v1/player` (Innertube)
+2. `ytInitialPlayerResponse` extracted from the watch page
+
+Once it has tracks, it:
+
+1. Scores them to prefer manual English, then ASR English, then other useful languages.
+2. Fetches `baseUrl` with `fmt=json3`.
+3. Flattens timed-text events into ordered segments.
+4. Groups short fragments into sentence-like lines.
+
+This is the main place where `kiss-translator` influenced the design.
+
+### Secondary path: legacy timedtext
+
+If `captionTracks + json3` fails, the Worker falls back to:
+
+1. `https://www.youtube.com/api/timedtext?v=...&type=list`
+2. best available track from the XML list
+3. `fmt=srv3` XML body
+
+This keeps compatibility with videos where player metadata is incomplete but timedtext still works.
+
+### Final path: Invidious
+
+If YouTube direct access fails, the Worker tries multiple Invidious instances:
+
+1. list available caption tracks
+2. select the best track
+3. fetch VTT/body
+4. parse into normalized segments
+
+## Browser-First, But Not Browser-Only
+
+The browser now prepares captions first by calling `/api/captions`, then sends the returned `CaptionPayload` into `/api/generate`.
+
+That gives us the benefits of a "frontend-first" flow:
+
+1. one subtitle fetch before generation
+2. better user feedback earlier in the request
+3. generate endpoint can skip re-fetching when the browser already has captions
+
+But it is still not "browser-only", because the Worker remains the stable proxy and fallback layer.
+
+## API Contracts
+
+### `POST /api/captions`
+
+Request:
+
+```json
+{
+  "videoId": "xRh2sVcNXQ8"
 }
 ```
 
-- No framework needed — two routes only
-- CORS headers for local dev
+Response:
 
-### `src/services/youtube.ts` — Subtitle Extraction (~80 lines)
-
-**`extractVideoId(url: string): string | null`**
-- Regex handles: `youtube.com/watch?v=`, `youtu.be/`, `youtube.com/embed/`, `youtube.com/shorts/`
-
-**`fetchCaptions(videoId: string): Promise<{ title: string; text: string }>`**
-- **Strategy 1 (direct)**: Fetch `youtube.com/watch?v=ID`, extract `captionTracks` from embedded JSON, download caption XML, parse `<text>` nodes
-- **Strategy 2 (fallback)**: Call `https://inv.nadeko.net/api/v1/captions/ID`, pick English track, fetch its URL
-- Caption XML parsing: strip tags, decode HTML entities, join with timestamps
-- Prefer `en` manual captions > `en` auto-generated
-- Also extract video title from page
-
-### `src/services/gemini.ts` — Streaming AI Call (~40 lines)
-
-**`streamGenerate(apiKey: string, prompt: string): ReadableStream`**
-
-```
-POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:streamGenerateContent?alt=sse&key=KEY
-
-Body: { contents: [{ parts: [{ text: prompt }] }] }
-```
-
-- Read response as SSE, extract `candidates[0].content.parts[0].text` from each `data:` line
-- Return a `ReadableStream` that emits decoded text chunks
-- Handle errors gracefully (invalid key, rate limit, etc.)
-
-### `src/prompt.ts` — Prompt Template (~30 lines)
-
-**`buildPrompt(title: string, captions: string): string`**
-
-Core instructions to Gemini:
-
-```
-You are a professional editor. Given the following YouTube video subtitles,
-generate a well-structured Chinese dialogue article in HTML format.
-
-Rules:
-1. Identify speakers from context. Assign readable Chinese names/titles.
-2. Translate all content to natural, fluent Chinese.
-3. Output structure:
-   - <h1> article title (creative, captures the theme)
-   - <p class="meta"> brief intro (1-2 sentences about the conversation)
-   - Multiple topic sections, each with:
-     - <h2> topic heading
-     - Dialogue blocks: <div class="turn"><span class="speaker">Name</span><p>content</p></div>
-4. Summarize/condense repetitive parts. Keep it engaging.
-5. Output ONLY the HTML body content, no <html>/<head>/<body> wrappers.
-
-Video title: {title}
-Subtitles:
-{captions}
-```
-
-### `src/page.ts` — Frontend SPA (~120 lines)
-
-Single inline HTML string with embedded CSS and JS.
-
-**UI Layout:**
-```
-┌─────────────────────────────────────┐
-│  YouTube Dialogue Article Generator │
-│                                     │
-│  [YouTube URL input              ]  │
-│  [Gemini API Key input           ]  │
-│  [Generate]                         │
-│                                     │
-│  ┌─ Article Output ──────────────┐  │
-│  │ <h1>Title</h1>               │  │
-│  │ <p class="meta">intro</p>    │  │
-│  │ <h2>Topic 1</h2>             │  │
-│  │ Speaker A: content...        │  │
-│  │ Speaker B: content...        │  │
-│  │ <h2>Topic 2</h2>             │  │
-│  │ ...streamed incrementally... │  │
-│  └───────────────────────────────┘  │
-└─────────────────────────────────────┘
-```
-
-**CSS Design:**
-- Max-width `720px`, centered
-- System font stack with serif for article body
-- `.speaker` — bold, `color: #1a73e8`, margin-right
-- `.turn` — left border accent, padding, margin-bottom
-- `h2` — topic divider with subtle top border
-- `.meta` — gray italic intro text
-- Responsive, clean whitespace
-
-**JS Logic (~40 lines):**
-```js
-async function generate() {
-  const res = await fetch('/api/generate', {
-    method: 'POST',
-    body: JSON.stringify({ url, apiKey })
-  })
-  const reader = res.body.getReader()
-  const decoder = new TextDecoder()
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) break
-    output.innerHTML += decoder.decode(value)
-  }
+```json
+{
+  "title": "Video title",
+  "language": "en",
+  "source": "youtube",
+  "segments": [
+    { "start": 0, "text": "..." }
+  ]
 }
 ```
-- API key saved to `localStorage` for convenience
-- Loading state with disabled button + spinner
-- Error display for invalid URL / API failures
 
-## API Contract
+Notes:
+
+1. `source` is `youtube` or `invidious`.
+2. `segments` are already normalized and suitable for prompt building.
 
 ### `POST /api/generate`
 
-**Request:**
+Request:
+
+```json
+{
+  "url": "https://www.youtube.com/watch?v=xRh2sVcNXQ8",
+  "apiKey": "AIza...",
+  "captions": {
+    "title": "Video title",
+    "language": "en",
+    "source": "youtube",
+    "segments": [
+      { "start": 0, "text": "..." }
+    ]
+  }
+}
+```
+
+Fallback request shape still supported:
+
 ```json
 {
   "url": "https://www.youtube.com/watch?v=xRh2sVcNXQ8",
@@ -171,67 +172,72 @@ async function generate() {
 }
 ```
 
-**Response:** `Content-Type: text/event-stream`
+Behavior:
 
-Each SSE chunk is raw HTML text that the client appends to the output container.
+1. If `captions` is present and valid, the Worker uses it directly.
+2. Otherwise the Worker tries `fetchCaptions(videoId)`.
+3. If subtitle extraction fails completely, the Worker falls back to the Gemini video prompt.
 
-**Error responses:**
-| Status | Body | Condition |
-|--------|------|-----------|
-| 400 | `{"error": "Invalid YouTube URL"}` | Bad URL format |
-| 400 | `{"error": "API key required"}` | Missing Gemini key |
-| 502 | `{"error": "Failed to fetch captions"}` | Both strategies failed |
+## Key Files
 
-## Deployment
+### [src/index.ts](/Users/xu/projects/youtube-readcast/src/index.ts)
 
-```bash
-# Install
-npm install
+Worker router and request lifecycle:
 
-# Local dev
-npx wrangler dev
+1. serves the page
+2. returns structured captions
+3. streams generation output over SSE
 
-# Deploy
-npx wrangler deploy
-```
+### [src/services/youtube.ts](/Users/xu/projects/youtube-readcast/src/services/youtube.ts)
 
-`wrangler.toml`:
-```toml
-name = "yt-dialogue-generator"
-main = "src/index.ts"
-compatibility_date = "2024-12-01"
-```
+Owns YouTube caption extraction:
 
-No secrets needed — API key comes from the client.
+1. videoId parsing
+2. track discovery
+3. `json3` event parsing
+4. sentence-style grouping
+5. timedtext fallback
+6. Invidious fallback
 
-## Key Design Decisions
+### [src/page.ts](/Users/xu/projects/youtube-readcast/src/page.ts)
+
+Owns the browser app:
+
+1. input handling
+2. client-side videoId extraction
+3. browser-first `/api/captions` request
+4. `/api/generate` SSE consumption
+5. live preview rendering
+
+### [src/prompt.ts](/Users/xu/projects/youtube-readcast/src/prompt.ts)
+
+Converts the structured `CaptionPayload` into a Gemini prompt that asks for Chinese editorial HTML output.
+
+## Design Decisions
 
 | Decision | Why |
 |---|---|
-| No framework (Hono, itty-router) | 2 routes; raw handler is simpler and zero-dependency |
-| Inline SPA, no static assets | Avoids KV/R2 for a single HTML page; simpler deploy |
-| User-provided API key | No server secrets to manage; user controls their own quota |
-| Dual caption strategy | Direct scrape may fail from Workers; Invidious is reliable fallback |
-| SSE raw HTML stream | Simplest approach — no markdown parsing client-side, Gemini outputs HTML directly |
-| Gemini 2.0 Flash | Free tier, fast, good at structured output and translation |
+| Reuse `captionTracks + json3` ideas | More aligned with how YouTube exposes subtitles today |
+| Keep Worker proxy layer | Standalone web app cannot reliably copy extension-only same-page interception |
+| Let browser request `/api/captions` first | Better UX and avoids duplicate fetches in the common case |
+| Keep timedtext and Invidious fallbacks | YouTube behavior changes often; single-path designs are brittle |
+| Keep Gemini fallback | Some videos still fail all caption strategies |
 
-## Risks & Mitigations
+## Risks And Mitigations
 
 | Risk | Mitigation |
 |---|---|
-| YouTube blocks CF Worker IPs | Invidious fallback; clear error message if both fail |
-| Invidious instance goes down | Use multiple instances as fallback chain |
-| Gemini outputs malformed HTML | Wrap in a sanitized container; CSS handles graceful degradation |
-| Long videos exceed token limit | Truncate captions to ~8000 words with note in prompt |
-| CORS issues in dev | Add `Access-Control-Allow-Origin` headers |
+| YouTube changes player metadata format | Fall back from Innertube to watch-page extraction, then timedtext |
+| `json3` returns fragmented events | Group events into larger prompt-friendly segments |
+| Cross-origin browser strategy is unreliable | Do not depend on direct browser fetches to YouTube |
+| Invidious instances go down | Use an ordered instance list |
+| Long transcripts overload the prompt | Prompt builder truncates by character budget |
 
-## Implementation Order
+## Future Options
 
-1. Scaffold: `wrangler init`, `tsconfig.json`, `package.json`
-2. `youtube.ts` — subtitle extraction with both strategies
-3. `gemini.ts` — streaming wrapper
-4. `prompt.ts` — prompt template
-5. `page.ts` — frontend HTML/CSS/JS
-6. `index.ts` — wire everything together
-7. Local test with `wrangler dev`
-8. Deploy with `wrangler deploy`
+If we ever want a truly `kiss-translator`-style frontend path, it would need a different product shape:
+
+1. a browser extension that runs on `youtube.com`, or
+2. an embedded experience hosted inside a YouTube page context
+
+For the current standalone Worker app, the present hybrid architecture is the more stable choice.

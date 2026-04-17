@@ -15,8 +15,8 @@ export interface CaptionPayload {
 export interface GenerateRequestBody {
   url?: string
   apiKey?: string
+  captions?: CaptionPayload
   transcript?: string
   title?: string
   model?: string
 }
-

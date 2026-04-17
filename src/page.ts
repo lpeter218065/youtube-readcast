@@ -1024,10 +1024,52 @@ export function getPageHtml(): string {
 
       form.addEventListener('submit', handleSubmit)
 
+      function extractVideoIdFromUrl(input) {
+        const trimmed = input.trim()
+
+        if (/^[a-zA-Z0-9_-]{11}$/.test(trimmed)) {
+          return trimmed
+        }
+
+        let url
+
+        try {
+          url = new URL(trimmed)
+        } catch {
+          return null
+        }
+
+        const hostname = url.hostname.replace(/^www\\./, '')
+
+        if (hostname === 'youtu.be') {
+          const candidate = url.pathname.split('/').filter(Boolean)[0]
+          return candidate && /^[a-zA-Z0-9_-]{11}$/.test(candidate) ? candidate : null
+        }
+
+        if (hostname === 'youtube.com' || hostname === 'm.youtube.com') {
+          if (url.pathname === '/watch') {
+            const candidate = url.searchParams.get('v')
+            return candidate && /^[a-zA-Z0-9_-]{11}$/.test(candidate) ? candidate : null
+          }
+
+          const candidate = url.pathname.split('/').filter(Boolean)[1]
+          if (
+            (url.pathname.startsWith('/embed/') ||
+              url.pathname.startsWith('/shorts/') ||
+              url.pathname.startsWith('/live/')) &&
+            candidate &&
+            /^[a-zA-Z0-9_-]{11}$/.test(candidate)
+          ) {
+            return candidate
+          }
+        }
+
+        return null
+      }
+
       async function fetchCaptionsClientSide(videoUrl, signal) {
-        const match = videoUrl.match(/(?:v=|youtu\\.be\\/)([a-zA-Z0-9_-]{11})/)
-        if (!match) throw new Error('Invalid URL')
-        const videoId = match[1]
+        const videoId = extractVideoIdFromUrl(videoUrl)
+        if (!videoId) throw new Error('Invalid URL')
 
         const resp = await fetch('/api/captions', {
           method: 'POST',
@@ -1042,27 +1084,12 @@ export function getPageHtml(): string {
         }
 
         const data = await resp.json()
-        const xml = data.xml || ''
-        const title = data.title || ''
 
-        // Parse XML captions
-        const textParts = []
-        const regex = /<text[^>]*>([^<]*)<\\/text>/g
-        let m
-        while ((m = regex.exec(xml)) !== null) {
-          const decoded = m[1]
-            .replace(/&amp;/g, '&')
-            .replace(/&lt;/g, '<')
-            .replace(/&gt;/g, '>')
-            .replace(/&quot;/g, '"')
-            .replace(/&#39;/g, "'")
-            .replace(/\\n/g, ' ')
-            .trim()
-          if (decoded) textParts.push(decoded)
+        if (!Array.isArray(data.segments) || !data.segments.length) {
+          throw new Error('Empty captions')
         }
 
-        if (!textParts.length) throw new Error('Empty captions')
-        return { transcript: textParts.join(' '), title }
+        return data
       }
       stopButton.addEventListener('click', stopGeneration)
       demoButton.addEventListener('click', () => {
@@ -1096,20 +1123,17 @@ export function getPageHtml(): string {
         scheduleRender(PLACEHOLDER_HTML)
 
         // Try to extract captions client-side first
-        let transcript = ''
-        let title = ''
+        let captions = null
         try {
           logStatus('尝试从浏览器端获取字幕…')
-          const captionData = await fetchCaptionsClientSide(url, activeController.signal)
-          transcript = captionData.transcript
-          title = captionData.title
-          logStatus('浏览器端字幕提取成功。', 'success')
+          captions = await fetchCaptionsClientSide(url, activeController.signal)
+          logStatus('浏览器端字幕预取成功。', 'success')
         } catch (e) {
           logStatus('浏览器端字幕提取失败，将由服务端处理。')
         }
 
         try {
-          const payload = { url, apiKey, transcript: transcript || undefined, title: title || undefined }
+          const payload = { url, apiKey, captions: captions || undefined }
           const response = await fetch('/api/generate', {
             method: 'POST',
             headers: {
@@ -1230,7 +1254,12 @@ export function getPageHtml(): string {
         }
 
         if (event === 'meta') {
-          const sourceLabel = payload.source === 'youtube' ? 'YouTube 直连' : '备用字幕源'
+          const sourceLabel =
+            payload.source === 'youtube'
+              ? 'YouTube 直连'
+              : payload.source === 'invidious'
+                ? '备用字幕源'
+                : '浏览器预取'
           setMeta('《' + payload.title + '》 · ' + payload.language + ' 字幕 · ' + sourceLabel)
           previewNote.textContent = payload.title
           logStatus('字幕就绪：' + payload.title)

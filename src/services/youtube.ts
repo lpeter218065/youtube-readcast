@@ -52,6 +52,27 @@ interface InvidiousCaptionsResponse {
   captions?: InvidiousTrack[]
 }
 
+interface YouTubeTimedTextSegment {
+  utf8?: string
+  tOffsetMs?: number
+}
+
+interface YouTubeTimedTextEvent {
+  segs?: YouTubeTimedTextSegment[]
+  tStartMs?: number
+  dDurationMs?: number
+}
+
+interface YouTubeTimedTextResponse {
+  events?: YouTubeTimedTextEvent[]
+}
+
+interface FlattenedCaptionEvent {
+  text: string
+  start: number
+  end: number
+}
+
 export function extractVideoId(input: string): string | null {
   const trimmed = input.trim()
 
@@ -113,57 +134,50 @@ async function fetchDirectCaptions(
   videoId: string,
   options: FetchCaptionsOptions
 ): Promise<CaptionPayload> {
-  // Try the timedtext list API to discover available tracks
-  const listUrl = new URL('https://www.youtube.com/api/timedtext')
-  listUrl.searchParams.set('v', videoId)
-  listUrl.searchParams.set('type', 'list')
+  let title: string | null = null
+  let language = 'unknown'
+  let segments: CaptionSegment[] = []
+  let discoveryError: unknown = null
 
-  const listXml = await fetchText(listUrl, WATCH_HEADERS, CAPTION_TIMEOUT_MS, options.signal)
+  try {
+    options.onStatus?.('尝试解析 YouTube 字幕轨…')
+    const discovered = await discoverYouTubeCaptionState(videoId, options.signal)
+    title = discovered.title
 
-  // Parse track list from XML like <track ... lang_code="en" kind="asr" ... />
-  const trackMatches = [...listXml.matchAll(/<track\s+([^>]+)>/g)]
-  if (!trackMatches.length) {
-    throw new Error('视频没有可用字幕')
+    if (discovered.tracks.length) {
+      const track = selectCaptionTrack(discovered.tracks)
+      language = track.languageCode ?? language
+      options.onStatus?.('已定位字幕轨，尝试拉取字幕事件…')
+      segments = await fetchYouTubeTrackSegments(track, language, options.signal)
+    }
+  } catch (error) {
+    discoveryError = error
   }
 
-  // Find best track: prefer non-asr en, then asr en, then any
-  let bestLang = 'en'
-  let bestKind = ''
-  for (const m of trackMatches) {
-    const attrs = m[1]
-    const lang = attrs.match(/lang_code="([^"]+)"/)?.[1] ?? ''
-    const kind = attrs.match(/kind="([^"]+)"/)?.[1] ?? ''
-    if (lang === 'en' && kind !== 'asr') {
-      bestLang = lang
-      bestKind = kind
-      break
-    }
-    if (lang === 'en') {
-      bestLang = lang
-      bestKind = kind
+  if (!segments.length) {
+    options.onStatus?.('字幕轨拉取失败，回退到 timedtext 列表接口…')
+
+    try {
+      const legacyResult = await fetchLegacyTimedTextCaptions(videoId, options.signal)
+      language = legacyResult.language
+      segments = legacyResult.segments
+    } catch (legacyError) {
+      throw new Error(
+        `YouTube 直连字幕抓取失败：${toErrorMessage(discoveryError ?? legacyError)}；timedtext 回退失败：${toErrorMessage(legacyError)}`
+      )
     }
   }
-
-  // Fetch the actual caption content
-  const captionUrl = new URL('https://www.youtube.com/api/timedtext')
-  captionUrl.searchParams.set('v', videoId)
-  captionUrl.searchParams.set('lang', bestLang)
-  if (bestKind) captionUrl.searchParams.set('kind', bestKind)
-  captionUrl.searchParams.set('fmt', 'srv3')
-
-  const xml = await fetchText(captionUrl, WATCH_HEADERS, CAPTION_TIMEOUT_MS, options.signal)
-  const segments = compactSegments(parseXmlCaptions(xml))
 
   if (!segments.length) {
     throw new Error('字幕内容为空')
   }
 
-  const title =
-    (await fetchOEmbedTitle(videoId, options.signal)) ?? `YouTube Video ${videoId}`
-
   return {
-    title,
-    language: bestLang,
+    title:
+      title ??
+      (await fetchOEmbedTitle(videoId, options.signal)) ??
+      `YouTube Video ${videoId}`,
+    language,
     source: 'youtube',
     segments
   }
@@ -284,6 +298,149 @@ async function fetchInvidiousCaptions(
   throw new Error(
     `字幕抓取失败。直连错误：${toErrorMessage(directError)}；备用源错误：${toErrorMessage(lastError)}`
   )
+}
+
+async function discoverYouTubeCaptionState(
+  videoId: string,
+  parentSignal?: AbortSignal
+): Promise<{ title: string | null; tracks: YouTubeTrack[] }> {
+  let lastError: unknown = null
+
+  try {
+    const player = await fetchInnertubePlayer(videoId, parentSignal)
+    const tracks = extractCaptionTracks(player)
+
+    if (tracks.length) {
+      return {
+        title: player.videoDetails?.title ?? null,
+        tracks
+      }
+    }
+
+    lastError = new Error('Innertube 没有返回字幕轨')
+  } catch (error) {
+    lastError = error
+  }
+
+  try {
+    const watchUrl = new URL(`https://www.youtube.com/watch?v=${videoId}`)
+    const { html, playerResponse } = await fetchPlayerResponsePage(
+      watchUrl,
+      WATCH_TIMEOUT_MS,
+      parentSignal
+    )
+    const data = playerResponse as InnertubePlayerResponse
+    const tracks = extractCaptionTracks(data)
+
+    if (tracks.length) {
+      return {
+        title: data.videoDetails?.title ?? extractHtmlTitle(html),
+        tracks
+      }
+    }
+
+    lastError = new Error('页面中没有可用字幕轨')
+  } catch (error) {
+    lastError = error
+  }
+
+  throw new Error(`没有找到可用字幕轨：${toErrorMessage(lastError)}`)
+}
+
+function extractCaptionTracks(playerResponse: InnertubePlayerResponse): YouTubeTrack[] {
+  return (
+    playerResponse.captions?.playerCaptionsTracklistRenderer?.captionTracks?.filter(
+      (track) => Boolean(track?.baseUrl)
+    ) ?? []
+  )
+}
+
+async function fetchYouTubeTrackSegments(
+  track: YouTubeTrack,
+  languageCode: string,
+  parentSignal?: AbortSignal
+): Promise<CaptionSegment[]> {
+  const jsonUrl = new URL(track.baseUrl)
+  jsonUrl.searchParams.set('fmt', 'json3')
+
+  try {
+    const data = (await fetchJson(
+      jsonUrl,
+      CAPTION_TIMEOUT_MS,
+      parentSignal,
+      WATCH_HEADERS
+    )) as YouTubeTimedTextResponse
+    const jsonSegments = parseJson3Captions(data.events ?? [], languageCode)
+
+    if (jsonSegments.length) {
+      return compactSegments(jsonSegments)
+    }
+  } catch {
+    // Fall through to XML fallback.
+  }
+
+  const xmlUrl = new URL(track.baseUrl)
+  xmlUrl.searchParams.set('fmt', 'srv3')
+  const xml = await fetchText(xmlUrl, undefined, CAPTION_TIMEOUT_MS, parentSignal)
+  return compactSegments(parseXmlCaptions(xml))
+}
+
+async function fetchLegacyTimedTextCaptions(
+  videoId: string,
+  parentSignal?: AbortSignal
+): Promise<{ language: string; segments: CaptionSegment[] }> {
+  const listUrl = new URL('https://www.youtube.com/api/timedtext')
+  listUrl.searchParams.set('v', videoId)
+  listUrl.searchParams.set('type', 'list')
+
+  const listXml = await fetchText(listUrl, WATCH_HEADERS, CAPTION_TIMEOUT_MS, parentSignal)
+  const trackMatches = [...listXml.matchAll(/<track\s+([^>]+)>/g)]
+
+  if (!trackMatches.length) {
+    throw new Error('视频没有可用字幕')
+  }
+
+  let bestLang = 'en'
+  let bestKind = ''
+
+  for (const match of trackMatches) {
+    const attrs = match[1]
+    const language = attrs.match(/lang_code="([^"]+)"/)?.[1] ?? ''
+    const kind = attrs.match(/kind="([^"]+)"/)?.[1] ?? ''
+
+    if (language === 'en' && kind !== 'asr') {
+      bestLang = language
+      bestKind = kind
+      break
+    }
+
+    if (language === 'en') {
+      bestLang = language
+      bestKind = kind
+    }
+  }
+
+  const captionUrl = new URL('https://www.youtube.com/api/timedtext')
+  captionUrl.searchParams.set('v', videoId)
+  captionUrl.searchParams.set('lang', bestLang)
+
+  if (bestKind) {
+    captionUrl.searchParams.set('kind', bestKind)
+  }
+
+  captionUrl.searchParams.set('fmt', 'srv3')
+
+  const xml = await fetchText(captionUrl, WATCH_HEADERS, CAPTION_TIMEOUT_MS, parentSignal)
+  const segments = compactSegments(parseXmlCaptions(xml))
+
+  if (!segments.length) {
+    throw new Error('timedtext 返回了空字幕')
+  }
+
+  return {
+    language: bestLang,
+    segments
+  }
 }
 
 function extractEmbeddedJson(source: string, anchor: string): unknown | null {
@@ -485,6 +642,195 @@ function parseXmlCaptions(xml: string): CaptionSegment[] {
   return segments
 }
 
+function parseJson3Captions(
+  events: YouTubeTimedTextEvent[],
+  languageCode: string
+): CaptionSegment[] {
+  const flattened = flattenTimedTextEvents(events)
+
+  if (!flattened.length) {
+    return []
+  }
+
+  if (isNoSpaceLanguage(languageCode)) {
+    return compactSegments(groupNoSpaceEvents(flattened))
+  }
+
+  const defaultSegments = groupWordEvents(flattened)
+
+  if (isQualityPoor(defaultSegments)) {
+    return compactSegments(groupWordEvents(flattened, true))
+  }
+
+  return compactSegments(defaultSegments)
+}
+
+function flattenTimedTextEvents(events: YouTubeTimedTextEvent[]): FlattenedCaptionEvent[] {
+  const flattened: FlattenedCaptionEvent[] = []
+  let buffer: FlattenedCaptionEvent | null = null
+
+  for (const event of events) {
+    const segments = event.segs ?? []
+    const baseStart = event.tStartMs ?? 0
+    const duration = event.dDurationMs ?? 0
+
+    for (let index = 0; index < segments.length; index += 1) {
+      const part = segments[index]
+      const text = normalizeCaptionText(part.utf8 ?? '')
+      const start = baseStart + (part.tOffsetMs ?? 0)
+
+      if (buffer) {
+        buffer.end = !buffer.end || buffer.end > start ? start : buffer.end
+
+        if (buffer.text) {
+          flattened.push(buffer)
+        }
+
+        buffer = null
+      }
+
+      buffer = {
+        text,
+        start,
+        end: index === segments.length - 1 ? baseStart + duration : 0
+      }
+    }
+  }
+
+  if (buffer?.text) {
+    flattened.push(buffer)
+  }
+
+  return flattened.filter((segment) => segment.text)
+}
+
+function isNoSpaceLanguage(languageCode: string): boolean {
+  return ['zh', 'ja', 'ko', 'th', 'lo', 'km', 'my'].some((code) =>
+    languageCode.toLowerCase().startsWith(code)
+  )
+}
+
+function groupNoSpaceEvents(events: FlattenedCaptionEvent[]): CaptionSegment[] {
+  const grouped: CaptionSegment[] = []
+  let current: FlattenedCaptionEvent | null = null
+  const maxLength = 30
+
+  const flush = () => {
+    if (!current?.text) {
+      return
+    }
+
+    grouped.push({
+      start: current.start / 1000,
+      text: current.text
+    })
+    current = null
+  }
+
+  for (const event of events) {
+    if (!current) {
+      current = { ...event }
+      continue
+    }
+
+    const previous: FlattenedCaptionEvent = current
+    const hasPause = event.start - previous.end > 1000
+    current = {
+      start: previous.start,
+      end: event.end,
+      text: `${previous.text}${event.text}`
+    }
+
+    if (/[。！？?!…]$/.test(current.text) || current.text.length >= maxLength || hasPause) {
+      flush()
+    }
+  }
+
+  flush()
+  return grouped
+}
+
+function groupWordEvents(
+  events: FlattenedCaptionEvent[],
+  usePauseWords = false
+): CaptionSegment[] {
+  const grouped: CaptionSegment[] = []
+  const pauseWords = new Set([
+    'actually',
+    'also',
+    'and',
+    'because',
+    'but',
+    'however',
+    'if',
+    'maybe',
+    'now',
+    'or',
+    'right',
+    'so',
+    'then',
+    'well'
+  ])
+
+  let buffer: FlattenedCaptionEvent[] = []
+  let wordCount = 0
+
+  const flush = () => {
+    if (!buffer.length) {
+      return
+    }
+
+    grouped.push({
+      start: buffer[0].start / 1000,
+      text: normalizeCaptionText(buffer.map((segment) => segment.text).join(' '))
+    })
+    buffer = []
+    wordCount = 0
+  }
+
+  for (const event of events) {
+    if (!event.text) {
+      continue
+    }
+
+    const last = buffer[buffer.length - 1]
+
+    if (last) {
+      const isEndOfSentence = /[.?!…)\]]$/.test(last.text)
+      const isPause = event.start - last.end > 1000
+      const isCommaStop = /[,]$/.test(last.text) && wordCount >= 18
+      const startsWithCue = /^[[(♪]/.test(event.text)
+      const startsWithPauseWord =
+        usePauseWords &&
+        buffer.length > 1 &&
+        pauseWords.has(event.text.toLowerCase().split(' ')[0])
+
+      if (isEndOfSentence || isPause || isCommaStop || startsWithCue || startsWithPauseWord) {
+        flush()
+      }
+    }
+
+    buffer.push(event)
+    wordCount += event.text.split(/\s+/).length
+  }
+
+  flush()
+  return grouped
+}
+
+function isQualityPoor(
+  segments: CaptionSegment[],
+  lengthThreshold = 220,
+  percentageThreshold = 0.2
+): boolean {
+  if (!segments.length) {
+    return false
+  }
+
+  const longLines = segments.filter((segment) => segment.text.length > lengthThreshold).length
+  return longLines / segments.length > percentageThreshold
+}
+
 function parseVttCaptions(vtt: string): CaptionSegment[] {
   const blocks = vtt.replace(/\r\n/g, '\n').split(/\n{2,}/)
   const segments: CaptionSegment[] = []
@@ -669,12 +1015,16 @@ async function fetchOEmbedTitle(
 async function fetchJson(
   url: string | URL,
   timeoutMs: number,
-  parentSignal?: AbortSignal
+  parentSignal?: AbortSignal,
+  headers?: HeadersInit
 ): Promise<unknown> {
   const requestState = createTimedSignal(parentSignal, timeoutMs)
 
   try {
-    const response = await fetch(url, { signal: requestState.signal })
+    const response = await fetch(url, {
+      headers,
+      signal: requestState.signal
+    })
 
     if (!response.ok) {
       throw new Error(`请求失败 (${response.status})`)

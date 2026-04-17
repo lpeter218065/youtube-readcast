@@ -2,7 +2,7 @@ import { getPageHtml } from './page'
 import { buildPrompt, buildVideoPrompt } from './prompt'
 import { streamGenerate } from './services/gemini'
 import { extractVideoId, fetchCaptions } from './services/youtube'
-import type { GenerateRequestBody } from './types'
+import type { CaptionPayload, GenerateRequestBody } from './types'
 import { sseEvent } from './utils/sse'
 
 interface Env {}
@@ -86,15 +86,25 @@ async function handleGenerate(request: Request): Promise<Response> {
 
         let prompt: string
 
-        // If client already extracted the transcript, use it directly
+        const clientCaptions = getClientCaptions(body?.captions)
         const clientTranscript = body?.transcript?.trim()
-        if (clientTranscript) {
+
+        // If the browser already prepared structured captions, use them directly.
+        if (clientCaptions) {
+          send('meta', {
+            title: clientCaptions.title,
+            language: clientCaptions.language,
+            source: clientCaptions.source
+          })
+          send('status', { message: '字幕已准备，开始生成中文排版稿…' })
+          prompt = buildPrompt(clientCaptions)
+        } else if (clientTranscript) {
           const title = body?.title?.trim() || `YouTube Video ${videoId}`
-          send('meta', { title, language: 'en', source: 'client' })
+          send('meta', { title, language: 'unknown', source: 'client' })
           send('status', { message: '字幕已准备，开始生成中文排版稿…' })
           prompt = buildPrompt({
             title,
-            language: 'en',
+            language: 'unknown',
             source: 'client',
             segments: [{ start: 0, text: clientTranscript }]
           })
@@ -146,77 +156,56 @@ async function handleCaptions(request: Request): Promise<Response> {
   }
 
   try {
-    // Proxy innertube player request
-    const playerResp = await fetch(
-      'https://www.youtube.com/youtubei/v1/player?prettyPrint=false',
-      {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          'user-agent':
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
-        },
-        body: JSON.stringify({
-          videoId,
-          context: {
-            client: {
-              hl: 'en',
-              gl: 'US',
-              clientName: 'WEB',
-              clientVersion: '2.20241126.01.00'
-            }
-          }
-        })
-      }
-    )
-
-    if (!playerResp.ok) {
-      return jsonResponse({ error: `YouTube returned ${playerResp.status}` }, 502)
-    }
-
-    const data = (await playerResp.json()) as {
-      captions?: {
-        playerCaptionsTracklistRenderer?: {
-          captionTracks?: Array<{
-            baseUrl: string
-            languageCode?: string
-            kind?: string
-          }>
-        }
-      }
-      videoDetails?: { title?: string }
-    }
-
-    const tracks =
-      data?.captions?.playerCaptionsTracklistRenderer?.captionTracks
-
-    if (!tracks?.length) {
-      return jsonResponse({ error: 'No captions available' }, 404)
-    }
-
-    // Pick best track
-    let best = tracks[0]
-    for (const t of tracks) {
-      if (t.languageCode === 'en' && t.kind !== 'asr') { best = t; break }
-      if (t.languageCode === 'en') best = t
-    }
-
-    const captionUrl = new URL(best.baseUrl)
-    captionUrl.searchParams.set('fmt', 'srv3')
-
-    const captionResp = await fetch(captionUrl.toString())
-    if (!captionResp.ok) {
-      return jsonResponse({ error: 'Caption download failed' }, 502)
-    }
-
-    const xml = await captionResp.text()
-    const title = data?.videoDetails?.title ?? ''
-
-    return new Response(JSON.stringify({ xml, title, lang: best.languageCode ?? 'en' }), {
-      headers: JSON_HEADERS
-    })
+    const captions = await fetchCaptions(videoId, { signal: request.signal })
+    return jsonResponse(captions)
   } catch (err) {
     return jsonResponse({ error: toErrorMessage(err) }, 500)
+  }
+}
+
+function getClientCaptions(input: unknown): CaptionPayload | null {
+  if (!input || typeof input !== 'object') {
+    return null
+  }
+
+  const data = input as Partial<CaptionPayload>
+  const title = typeof data.title === 'string' ? data.title.trim() : ''
+  const language = typeof data.language === 'string' ? data.language.trim() : ''
+  const source =
+    data.source === 'youtube' || data.source === 'invidious' || data.source === 'client'
+      ? data.source
+      : null
+  const segments = Array.isArray(data.segments)
+    ? data.segments
+        .map((segment) => {
+          if (!segment || typeof segment !== 'object') {
+            return null
+          }
+
+          const start =
+            typeof segment.start === 'number' && Number.isFinite(segment.start)
+              ? segment.start
+              : null
+          const text = typeof segment.text === 'string' ? segment.text.trim() : ''
+
+          if (start === null || !text) {
+            return null
+          }
+
+          return { start, text }
+        })
+        .filter((segment): segment is CaptionPayload['segments'][number] => Boolean(segment))
+    : []
+
+  if (!title || !language || !source || !segments.length) {
+    return null
+  }
+
+  return {
+    title,
+    language,
+    source,
+    segments
   }
 }
 
