@@ -14,15 +14,16 @@ const WATCH_HEADERS = {
   'user-agent':
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
   accept:
-    'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-  cookie: 'CONSENT=PENDING+987; SOCS=CAESEwgDEgk2NjI1NTY1MjQaAmVuIAEaBgiA_t-2Bg'
+    'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8'
 }
 
 const WATCH_TIMEOUT_MS = 15000
 const CAPTION_TIMEOUT_MS = 6000
 const INVIDIOUS_TIMEOUT_MS = 5000
-const INNERTUBE_API_KEY = 'AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8'
+const DEFAULT_INNERTUBE_API_KEY = 'AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8'
 const TRANSCRIPT_LANGUAGES = ['zh-CN', 'zh-Hans', 'zh', 'en'] as const
+const DEFAULT_CONSENT_COOKIE = 'CONSENT=PENDING+987'
+const SOCS_COOKIE = 'SOCS=CAESEwgDEgk2NjI1NTY1MjQaAmVuIAEaBgiA_t-2Bg'
 
 const INVIDIOUS_INSTANCES = [
   'https://inv.nadeko.net',
@@ -89,6 +90,20 @@ interface YoutubeTranscriptLine {
   offset: number
   lang?: string
 }
+
+interface WatchPageState {
+  html: string
+  title: string | null
+  apiKey: string | null
+  playerResponse: InnertubePlayerResponse | null
+}
+
+class YouTubeRequestBlockedError extends Error {}
+class YouTubePoTokenRequiredError extends Error {}
+class YouTubeAgeRestrictedError extends Error {}
+class YouTubeVideoUnavailableError extends Error {}
+class YouTubeVideoUnplayableError extends Error {}
+class YouTubeConsentError extends Error {}
 
 export function extractVideoId(input: string): string | null {
   const trimmed = input.trim()
@@ -174,10 +189,26 @@ async function fetchDirectCaptions(
     title = discovered.title
 
     if (discovered.tracks.length) {
-      const track = selectCaptionTrack(discovered.tracks)
-      language = track.languageCode ?? language
       options.onStatus?.('已定位字幕轨，尝试拉取字幕事件…')
-      segments = await fetchYouTubeTrackSegments(track, language, options.signal)
+
+      let trackError: unknown = null
+
+      for (const track of sortCaptionTracks(discovered.tracks)) {
+        try {
+          language = track.languageCode ?? language
+          segments = await fetchYouTubeTrackSegments(track, language, options.signal)
+
+          if (segments.length) {
+            break
+          }
+        } catch (error) {
+          trackError = error
+        }
+      }
+
+      if (!segments.length && trackError) {
+        throw trackError
+      }
     }
   } catch (error) {
     discoveryError = error
@@ -217,7 +248,7 @@ async function fetchTranscriptCaptions(
   options: FetchCaptionsOptions
 ): Promise<CaptionPayload> {
   const errors: string[] = []
-  const transcriptFetch = createTranscriptFetch(options.signal)
+  const transcriptFetch = createTranscriptFetch(videoId, options.signal)
 
   for (const language of [...TRANSCRIPT_LANGUAGES, null] as Array<string | null>) {
     try {
@@ -259,6 +290,17 @@ interface InnertubePlayerResponse {
       captionTracks?: YouTubeTrack[]
     }
   }
+  playabilityStatus?: {
+    status?: string
+    reason?: string
+    errorScreen?: {
+      playerErrorMessageRenderer?: {
+        subreason?: {
+          runs?: Array<{ text?: string }>
+        }
+      }
+    }
+  }
   videoDetails?: {
     title?: string
   }
@@ -276,18 +318,20 @@ interface InnertubeClientConfig {
 async function fetchInnertubePlayer(
   videoId: string,
   client: InnertubeClientConfig,
+  apiKey: string,
   parentSignal?: AbortSignal
 ): Promise<InnertubePlayerResponse> {
   const requestState = createTimedSignal(parentSignal, WATCH_TIMEOUT_MS)
 
   try {
     const response = await fetch(
-      `https://www.youtube.com/youtubei/v1/player?key=${INNERTUBE_API_KEY}&prettyPrint=false`,
+      `https://www.youtube.com/youtubei/v1/player?key=${apiKey}&prettyPrint=false`,
       {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
-          'user-agent': client.userAgent ?? WATCH_HEADERS['user-agent']
+          'user-agent': client.userAgent ?? WATCH_HEADERS['user-agent'],
+          'accept-language': WATCH_HEADERS['accept-language']
         },
         body: JSON.stringify({
           videoId,
@@ -316,7 +360,10 @@ async function fetchInnertubePlayer(
     )
 
     if (!response.ok) {
-      throw new Error(`Innertube API 返回 ${response.status}`)
+      throw createFetchError(
+        `https://www.youtube.com/youtubei/v1/player?key=${apiKey}&prettyPrint=false`,
+        response.status
+      )
     }
 
     return (await response.json()) as InnertubePlayerResponse
@@ -393,6 +440,22 @@ async function discoverYouTubeCaptionState(
   parentSignal?: AbortSignal
 ): Promise<{ title: string | null; tracks: YouTubeTrack[] }> {
   let lastError: unknown = null
+  let watchState: WatchPageState | null = null
+  let watchTracks: YouTubeTrack[] = []
+
+  try {
+    watchState = await fetchWatchPageState(videoId, parentSignal)
+
+    if (watchState.playerResponse?.playabilityStatus) {
+      assertPlayerPlayability(watchState.playerResponse.playabilityStatus, videoId)
+    }
+
+    watchTracks = watchState.playerResponse
+      ? extractCaptionTracks(watchState.playerResponse)
+      : []
+  } catch (error) {
+    lastError = error
+  }
 
   const clients: InnertubeClientConfig[] = [
     {
@@ -416,12 +479,20 @@ async function discoverYouTubeCaptionState(
 
   for (const client of clients) {
     try {
-      const player = await fetchInnertubePlayer(videoId, client, parentSignal)
+      const player = await fetchInnertubePlayer(
+        videoId,
+        client,
+        watchState?.apiKey ?? DEFAULT_INNERTUBE_API_KEY,
+        parentSignal
+      )
+      if (player.playabilityStatus) {
+        assertPlayerPlayability(player.playabilityStatus, videoId)
+      }
       const tracks = extractCaptionTracks(player)
 
       if (tracks.length) {
         return {
-          title: player.videoDetails?.title ?? null,
+          title: player.videoDetails?.title ?? watchState?.title ?? null,
           tracks
         }
       }
@@ -432,26 +503,18 @@ async function discoverYouTubeCaptionState(
     }
   }
 
-  try {
-    const watchUrl = new URL(`https://www.youtube.com/watch?v=${videoId}`)
-    const { html, playerResponse } = await fetchPlayerResponsePage(
-      watchUrl,
-      WATCH_TIMEOUT_MS,
-      parentSignal
-    )
-    const data = playerResponse as InnertubePlayerResponse
-    const tracks = extractCaptionTracks(data)
-
-    if (tracks.length) {
-      return {
-        title: data.videoDetails?.title ?? extractHtmlTitle(html),
-        tracks
-      }
+  if (watchState && watchTracks.length) {
+    return {
+      title:
+        watchState.playerResponse?.videoDetails?.title ??
+        watchState.title ??
+        null,
+      tracks: watchTracks
     }
+  }
 
+  if (watchState && !watchTracks.length) {
     lastError = new Error('页面中没有可用字幕轨')
-  } catch (error) {
-    lastError = error
   }
 
   throw new Error(`没有找到可用字幕轨：${toErrorMessage(lastError)}`)
@@ -474,6 +537,7 @@ async function fetchYouTubeTrackSegments(
   languageCode: string,
   parentSignal?: AbortSignal
 ): Promise<CaptionSegment[]> {
+  assertTrackDoesNotRequirePoToken(track.baseUrl)
   const jsonUrl = new URL(track.baseUrl)
   jsonUrl.searchParams.set('fmt', 'json3')
 
@@ -482,20 +546,29 @@ async function fetchYouTubeTrackSegments(
       jsonUrl,
       CAPTION_TIMEOUT_MS,
       parentSignal,
-      WATCH_HEADERS
+      buildWatchHeaders()
     )) as YouTubeTimedTextResponse
     const jsonSegments = parseJson3Captions(data.events ?? [], languageCode)
 
     if (jsonSegments.length) {
       return compactSegments(jsonSegments)
     }
-  } catch {
+  } catch (error) {
+    if (error instanceof YouTubePoTokenRequiredError) {
+      throw error
+    }
     // Fall through to XML fallback.
   }
 
   const xmlUrl = new URL(track.baseUrl)
   xmlUrl.searchParams.set('fmt', 'srv3')
-  const xml = await fetchText(xmlUrl, undefined, CAPTION_TIMEOUT_MS, parentSignal)
+  assertTrackDoesNotRequirePoToken(xmlUrl)
+  const xml = await fetchText(
+    xmlUrl,
+    buildWatchHeaders(),
+    CAPTION_TIMEOUT_MS,
+    parentSignal
+  )
   return compactSegments(parseXmlCaptions(xml))
 }
 
@@ -507,7 +580,12 @@ async function fetchLegacyTimedTextCaptions(
   listUrl.searchParams.set('v', videoId)
   listUrl.searchParams.set('type', 'list')
 
-  const listXml = await fetchText(listUrl, WATCH_HEADERS, CAPTION_TIMEOUT_MS, parentSignal)
+  const listXml = await fetchText(
+    listUrl,
+    buildWatchHeaders(),
+    CAPTION_TIMEOUT_MS,
+    parentSignal
+  )
   const trackMatches = [...listXml.matchAll(/<track\s+([^>]+)>/g)]
 
   if (!trackMatches.length) {
@@ -544,7 +622,13 @@ async function fetchLegacyTimedTextCaptions(
 
   captionUrl.searchParams.set('fmt', 'srv3')
 
-  const xml = await fetchText(captionUrl, WATCH_HEADERS, CAPTION_TIMEOUT_MS, parentSignal)
+  assertTrackDoesNotRequirePoToken(captionUrl)
+  const xml = await fetchText(
+    captionUrl,
+    buildWatchHeaders(),
+    CAPTION_TIMEOUT_MS,
+    parentSignal
+  )
   const segments = compactSegments(parseXmlCaptions(xml))
 
   if (!segments.length) {
@@ -583,54 +667,131 @@ function extractEmbeddedJson(source: string, anchor: string): unknown | null {
   }
 }
 
-async function fetchPlayerResponsePage(
+async function fetchWatchPageState(
+  videoId: string,
+  parentSignal?: AbortSignal
+): Promise<WatchPageState> {
+  const url = new URL(`https://www.youtube.com/watch?v=${videoId}`)
+  const html = await fetchWatchPageHtml(url, WATCH_TIMEOUT_MS, parentSignal)
+
+  return {
+    html,
+    title: extractHtmlTitle(html),
+    apiKey: extractInnertubeApiKey(html),
+    playerResponse:
+      (extractEmbeddedJson(html, 'ytInitialPlayerResponse') as InnertubePlayerResponse | null) ??
+      null
+  }
+}
+
+async function fetchWatchPageHtml(
   url: URL,
   timeoutMs: number,
-  parentSignal?: AbortSignal
-): Promise<{ html: string; playerResponse: unknown }> {
+  parentSignal?: AbortSignal,
+  headers: HeadersInit = buildWatchHeaders()
+): Promise<string> {
   const requestState = createTimedSignal(parentSignal, timeoutMs)
 
   try {
     const response = await fetch(url, {
-      headers: WATCH_HEADERS,
+      headers,
       signal: requestState.signal
     })
 
-    if (!response.ok || !response.body) {
-      throw new Error(`YouTube 页面返回 ${response.status}`)
+    if (!response.ok) {
+      throw createFetchError(url, response.status)
     }
 
-    const reader = response.body.getReader()
-    const decoder = new TextDecoder()
-    let html = ''
+    const html = await response.text()
 
-    while (true) {
-      const { done, value } = await reader.read()
+    if (isConsentPage(html)) {
+      const consentToken = extractConsentToken(html)
 
-      if (done) {
-        break
+      if (!consentToken) {
+        throw new YouTubeConsentError('YouTube 返回了 consent 页面，但没有给出可用 token')
       }
 
-      html += decoder.decode(value, { stream: true })
-      const playerResponse = extractEmbeddedJson(html, 'ytInitialPlayerResponse')
+      const consentHtml = await fetchWatchPageHtml(
+        url,
+        timeoutMs,
+        parentSignal,
+        buildWatchHeaders(`CONSENT=YES+${consentToken}`)
+      )
 
-      if (playerResponse) {
-        await reader.cancel()
-        return { html, playerResponse }
+      if (isConsentPage(consentHtml)) {
+        throw new YouTubeConsentError('YouTube consent 页面重试后仍未通过')
       }
+
+      return consentHtml
     }
 
-    html += decoder.decode()
-    const playerResponse = extractEmbeddedJson(html, 'ytInitialPlayerResponse')
-
-    if (!playerResponse) {
-      throw new Error('页面中没有找到字幕元数据')
+    if (html.includes('class="g-recaptcha"')) {
+      throw new YouTubeRequestBlockedError('YouTube 要求验证，当前出口 IP 可能已被限制')
     }
 
-    return { html, playerResponse }
+    return html
   } finally {
     requestState.cleanup()
   }
+}
+
+function buildWatchHeaders(consentCookie = DEFAULT_CONSENT_COOKIE): HeadersInit {
+  return {
+    ...WATCH_HEADERS,
+    cookie: `${consentCookie}; ${SOCS_COOKIE}`
+  }
+}
+
+function extractInnertubeApiKey(html: string): string | null {
+  return html.match(/"INNERTUBE_API_KEY":\s*"([a-zA-Z0-9_-]+)"/)?.[1] ?? null
+}
+
+function isConsentPage(html: string): boolean {
+  return html.includes('action="https://consent.youtube.com/s"')
+}
+
+function extractConsentToken(html: string): string | null {
+  return html.match(/name="v"\s+value="([^"]+)"/)?.[1] ?? null
+}
+
+function assertPlayerPlayability(
+  playabilityStatus: InnertubePlayerResponse['playabilityStatus'],
+  videoId: string
+): void {
+  const status = playabilityStatus?.status
+
+  if (!status || status === 'OK') {
+    return
+  }
+
+  const reason = playabilityStatus?.reason ?? ''
+
+  if (
+    status === 'LOGIN_REQUIRED' &&
+    /confirm you['’]re not a bot/i.test(reason)
+  ) {
+    throw new YouTubeRequestBlockedError('YouTube 要求登录确认不是机器人，当前出口 IP 可能已被限制')
+  }
+
+  if (
+    status === 'LOGIN_REQUIRED' &&
+    /inappropriate for some users/i.test(reason)
+  ) {
+    throw new YouTubeAgeRestrictedError('该视频有年龄限制，匿名字幕抓取不可用')
+  }
+
+  if (status === 'ERROR' && /this video is unavailable/i.test(reason)) {
+    throw new YouTubeVideoUnavailableError(`视频不可用：${videoId}`)
+  }
+
+  const subReasons =
+    playabilityStatus?.errorScreen?.playerErrorMessageRenderer?.subreason?.runs
+      ?.map((item) => item.text?.trim())
+      .filter((item): item is string => Boolean(item)) ?? []
+  const detail = subReasons.length ? `：${subReasons.join(' / ')}` : ''
+  throw new YouTubeVideoUnplayableError(
+    `视频当前不可播放：${reason || status}${detail}`
+  )
 }
 
 function readBalancedBlock(source: string, startIndex: number): string | null {
@@ -677,7 +838,15 @@ function readBalancedBlock(source: string, startIndex: number): string | null {
 }
 
 function selectCaptionTrack<T extends YouTubeTrack | InvidiousTrack>(tracks: T[]): T {
-  return [...tracks].sort((left, right) => scoreTrack(right) - scoreTrack(left))[0]
+  return sortTracksByScore(tracks)[0]
+}
+
+function sortCaptionTracks(tracks: YouTubeTrack[]): YouTubeTrack[] {
+  return sortTracksByScore(tracks)
+}
+
+function sortTracksByScore<T extends YouTubeTrack | InvidiousTrack>(tracks: T[]): T[] {
+  return [...tracks].sort((left, right) => scoreTrack(right) - scoreTrack(left))
 }
 
 function scoreTrack(track: YouTubeTrack | InvidiousTrack): number {
@@ -708,6 +877,10 @@ function scoreTrack(track: YouTubeTrack | InvidiousTrack): number {
 
   if (label.includes('manual')) {
     score += 6
+  }
+
+  if ('baseUrl' in track && requiresPoToken(track.baseUrl)) {
+    score -= 300
   }
 
   return score
@@ -1244,7 +1417,7 @@ async function fetchJson(
     })
 
     if (!response.ok) {
-      throw new Error(`请求失败 (${response.status})`)
+      throw createFetchError(url, response.status)
     }
 
     return await response.json()
@@ -1268,7 +1441,7 @@ async function fetchText(
     })
 
     if (!response.ok) {
-      throw new Error(`请求失败 (${response.status})`)
+      throw createFetchError(url, response.status)
     }
 
     return await response.text()
@@ -1277,10 +1450,25 @@ async function fetchText(
   }
 }
 
-function createTranscriptFetch(parentSignal?: AbortSignal): typeof fetch {
+function createTranscriptFetch(
+  videoId: string,
+  parentSignal?: AbortSignal
+): typeof fetch {
+  let watchStatePromise: Promise<WatchPageState | null> | null = null
+
+  const getWatchState = async (): Promise<WatchPageState | null> => {
+    if (!watchStatePromise) {
+      watchStatePromise = fetchWatchPageState(videoId, parentSignal).catch(() => null)
+    }
+
+    return watchStatePromise
+  }
+
   return async (input, init) => {
     const url = toUrl(input)
-    const headers = new Headers(url.hostname.endsWith('youtube.com') ? WATCH_HEADERS : undefined)
+    const headers = new Headers(
+      url.hostname.endsWith('youtube.com') ? buildWatchHeaders() : undefined
+    )
     const initHeaders = new Headers(init?.headers)
     let timeoutMs = CAPTION_TIMEOUT_MS
 
@@ -1288,11 +1476,31 @@ function createTranscriptFetch(parentSignal?: AbortSignal): typeof fetch {
       headers.set(key, value)
     })
 
+    if (url.hostname.endsWith('youtube.com') && url.pathname === '/watch') {
+      const watchState = await getWatchState()
+
+      if (!watchState) {
+        throw new Error('无法为 youtube-transcript 获取 watch 页面')
+      }
+
+      return new Response(watchState.html, {
+        status: 200,
+        headers: {
+          'content-type': 'text/html; charset=utf-8'
+        }
+      })
+    }
+
     if (url.hostname.endsWith('youtube.com') && url.pathname === '/youtubei/v1/player') {
-      url.searchParams.set('key', INNERTUBE_API_KEY)
+      const watchState = await getWatchState()
+      url.searchParams.set('key', watchState?.apiKey ?? DEFAULT_INNERTUBE_API_KEY)
       timeoutMs = WATCH_TIMEOUT_MS
     } else if (url.hostname.endsWith('youtube.com') && url.pathname === '/watch') {
       timeoutMs = WATCH_TIMEOUT_MS
+    }
+
+    if (url.hostname.endsWith('youtube.com') && url.pathname === '/api/timedtext') {
+      assertTrackDoesNotRequirePoToken(url)
     }
 
     const requestState = createTimedSignal(parentSignal, timeoutMs)
@@ -1322,6 +1530,23 @@ function toUrl(input: RequestInfo | URL): URL {
 }
 
 function mapTranscriptError(videoId: string, error: unknown): string {
+  if (error instanceof YouTubePoTokenRequiredError) {
+    return error.message
+  }
+
+  if (error instanceof YouTubeRequestBlockedError) {
+    return error.message
+  }
+
+  if (
+    error instanceof YouTubeAgeRestrictedError ||
+    error instanceof YouTubeVideoUnavailableError ||
+    error instanceof YouTubeVideoUnplayableError ||
+    error instanceof YouTubeConsentError
+  ) {
+    return error.message
+  }
+
   if (error instanceof YoutubeTranscriptTooManyRequestError) {
     return 'YouTube 当前限制过多请求，暂时无法通过 youtube-transcript 抓取字幕'
   }
@@ -1338,6 +1563,29 @@ function mapTranscriptError(videoId: string, error: unknown): string {
   }
 
   return toErrorMessage(error).replace(/^\[YoutubeTranscript\]\s*🚨\s*/u, '')
+}
+
+function requiresPoToken(input: string | URL): boolean {
+  const url = typeof input === 'string' ? new URL(input) : input
+  return url.searchParams.get('exp') === 'xpe'
+}
+
+function assertTrackDoesNotRequirePoToken(input: string | URL): void {
+  if (requiresPoToken(input)) {
+    throw new YouTubePoTokenRequiredError('字幕轨需要额外的 PO Token，当前匿名抓取不可用')
+  }
+}
+
+function createFetchError(url: string | URL, status: number): Error {
+  const parsedUrl = typeof url === 'string' ? new URL(url) : url
+
+  if (parsedUrl.hostname.endsWith('youtube.com') && status === 429) {
+    return new YouTubeRequestBlockedError(
+      'YouTube 返回 429，当前出口 IP 很可能已被限制'
+    )
+  }
+
+  return new Error(`请求失败 (${status})`)
 }
 
 function createTimedSignal(parentSignal: AbortSignal | undefined, timeoutMs: number) {

@@ -73,15 +73,18 @@ Implemented in [src/services/youtube.ts](/Users/xu/projects/youtube-readcast/src
 
 The Worker first tries to discover `captionTracks` using:
 
-1. `youtubei/v1/player` (Innertube)
-2. `ytInitialPlayerResponse` extracted from the watch page
+1. the watch page, to extract `INNERTUBE_API_KEY`, handle consent, and read `ytInitialPlayerResponse`
+2. `youtubei/v1/player` (Innertube) with the extracted API key
+3. `ytInitialPlayerResponse` from the watch page as a final metadata fallback
 
 Once it has tracks, it:
 
 1. Scores them to prefer manual English, then ASR English, then other useful languages.
-2. Fetches `baseUrl` with `fmt=json3`.
-3. Flattens timed-text events into ordered segments.
-4. Groups short fragments into sentence-like lines.
+2. Tries multiple candidate tracks in score order instead of assuming the top track will work.
+3. Detects `exp=xpe` / PO-token-protected caption URLs explicitly, so they fail with a clear reason.
+4. Fetches `baseUrl` with `fmt=json3`.
+5. Flattens timed-text events into ordered segments.
+6. Groups short fragments into sentence-like lines.
 
 This is the main place where `kiss-translator` influenced the design.
 
@@ -100,8 +103,9 @@ This keeps compatibility with videos where player metadata is incomplete but tim
 If the direct YouTube extraction chain still fails, the Worker tries a `youtube-transcript`-style fallback:
 
 1. request transcript data with preferred languages (`zh-CN`, `zh-Hans`, `zh`, `en`, then auto)
-2. reuse a custom Worker-side `fetch` so the library's InnerTube request also carries the API key and Worker-friendly headers
-3. merge short transcript fragments into larger prompt-friendly blocks
+2. reuse a custom Worker-side `fetch` so the library's watch-page request also gets consent handling and the InnerTube request carries the extracted API key
+3. classify blocked IPs, age-restricted videos, and PO-token-required tracks more explicitly
+4. merge short transcript fragments into larger prompt-friendly blocks
 
 This path is simpler than the main `json3` parser, but it gives us one more YouTube-native strategy before falling all the way back to public Invidious instances.
 
@@ -236,6 +240,7 @@ Converts the structured `CaptionPayload` into a Gemini prompt that asks for Chin
 | Let browser request `/api/captions` first | Better UX and avoids duplicate fetches in the common case |
 | Keep timedtext and Invidious fallbacks | YouTube behavior changes often; single-path designs are brittle |
 | Keep Gemini fallback | Some videos still fail all caption strategies |
+| Detect blocked IP / consent / PO-token cases explicitly | Makes failures easier to reason about and avoids masking YouTube-side policy changes as generic empty subtitles |
 
 ## Risks And Mitigations
 
