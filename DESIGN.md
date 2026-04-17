@@ -2,38 +2,26 @@
 
 ## Overview
 
-YouTube Readcast is a Cloudflare Worker app that turns a YouTube video with captions into a Chinese reading-style article. The browser streams the final article preview, while the Worker handles subtitle discovery, multi-stage fallbacks, and Gemini generation.
+YouTube Readcast is a Cloudflare Worker app that turns a YouTube video with captions into a Chinese reading-style article. The browser streams the final article preview, while the Worker handles subtitle fetching and Gemini generation.
 
-The current design borrows subtitle ideas from `/Users/xu/projects/kiss-translator`, and also adopts a `youtube-transcript`-style fallback inspired by `/Users/xu/projects/youtube-article-generator`, while adapting both to a standalone web app rather than a browser extension.
+The current subtitle implementation now follows `/Users/xu/projects/youtube-article-generator` directly: use `youtube-transcript`, try preferred languages in order, normalize fragments, merge them into larger reading-friendly blocks, then prompt Gemini.
 
-## Why We Did Not Copy `kiss-translator` Directly
+## Why We Simplified The Subtitle Path
 
-`kiss-translator` runs inside `youtube.com` as an extension. That gives it two important advantages:
+Earlier iterations tried multiple YouTube-specific extraction paths such as:
 
-1. It can read the YouTube page directly and fetch `/watch` without cross-origin restrictions.
-2. It can inject code into the page and intercept the site's own `timedtext` XHR traffic.
+1. `youtubei/v1/player`
+2. watch-page metadata parsing
+3. legacy `timedtext`
+4. public Invidious fallbacks
 
-This project does not run inside YouTube. It runs on its own origin (`workers.dev` / custom domain), so a "pure frontend" YouTube strategy is not reliable here because:
+That made the code much harder to reason about, while the project `/Users/xu/projects/youtube-article-generator` already demonstrated that a much simpler `youtube-transcript`-based approach can work end-to-end for this product.
 
-1. The browser is cross-origin to `youtube.com`.
-2. Direct page fetches and request interception are not available.
-3. Subtitle access still needs a proxy/fallback layer to survive CORS and anti-bot failures.
+The design is intentionally simpler now:
 
-So the right adaptation is:
-
-1. Keep the browser as the orchestrator when possible.
-2. Keep subtitle fetching/proxying in the Worker.
-3. Reuse the better subtitle-track discovery and event parsing ideas from `kiss-translator`.
-
-## What We Borrowed From `kiss-translator`
-
-The current implementation reuses the spirit of its YouTube flow:
-
-1. Discover subtitle tracks from YouTube player metadata instead of relying only on a single legacy endpoint.
-2. Prefer `captionTracks[].baseUrl` and request `fmt=json3`.
-3. Convert `json3 events` into cleaner sentence-like segments before prompting Gemini.
-4. Keep fallback logic for weaker/older subtitle endpoints.
-5. Add a `youtube-transcript`-style fallback when the direct `captionTracks/json3` path is blocked.
+1. Keep the browser-first request flow.
+2. Let the Worker fetch subtitles through `youtube-transcript`.
+3. If subtitles still cannot be fetched, fall back to the Gemini video prompt.
 
 ## Current Architecture
 
@@ -54,11 +42,8 @@ More detailed flow:
 2. Browser extracts videoId locally
 3. Browser calls POST /api/captions
 4. Worker fetches captions with this order:
-   a. YouTube player metadata / captionTracks
-   b. captionTrack.baseUrl + fmt=json3
-   c. legacy timedtext list + srv3 XML
-   d. `youtube-transcript` fallback
-   e. Invidious instances
+   a. `youtube-transcript` with preferred languages
+   b. merge transcript fragments into larger text blocks
 5. Browser sends structured CaptionPayload to POST /api/generate
 6. Worker builds Gemini prompt from that payload
 7. Worker streams generated HTML back over SSE
@@ -67,56 +52,19 @@ More detailed flow:
 
 ## Caption Strategy
 
-### Primary path: YouTube caption tracks
+### Single path: `youtube-transcript`
 
 Implemented in [src/services/youtube.ts](/Users/xu/projects/youtube-readcast/src/services/youtube.ts).
 
-The Worker first tries to discover `captionTracks` using:
+The Worker now follows the same core method as `/Users/xu/projects/youtube-article-generator`:
 
-1. the watch page, to extract `INNERTUBE_API_KEY`, handle consent, and read `ytInitialPlayerResponse`
-2. `youtubei/v1/player` (Innertube) with the extracted API key
-3. `ytInitialPlayerResponse` from the watch page as a final metadata fallback
+1. call `fetchTranscript(videoId, { lang })` from `youtube-transcript`
+2. try languages in this order: `zh-CN`, `zh-Hans`, `zh`, `en`, then auto
+3. normalize subtitle fragments
+4. merge nearby fragments into longer reading-friendly blocks
+5. convert them into our `CaptionPayload`
 
-Once it has tracks, it:
-
-1. Scores them to prefer manual English, then ASR English, then other useful languages.
-2. Tries multiple candidate tracks in score order instead of assuming the top track will work.
-3. Detects `exp=xpe` / PO-token-protected caption URLs explicitly, so they fail with a clear reason.
-4. Fetches `baseUrl` with `fmt=json3`.
-5. Flattens timed-text events into ordered segments.
-6. Groups short fragments into sentence-like lines.
-
-This is the main place where `kiss-translator` influenced the design.
-
-### Secondary path: legacy timedtext
-
-If `captionTracks + json3` fails, the Worker falls back to:
-
-1. `https://www.youtube.com/api/timedtext?v=...&type=list`
-2. best available track from the XML list
-3. `fmt=srv3` XML body
-
-This keeps compatibility with videos where player metadata is incomplete but timedtext still works.
-
-### Tertiary path: `youtube-transcript` fallback
-
-If the direct YouTube extraction chain still fails, the Worker tries a `youtube-transcript`-style fallback:
-
-1. request transcript data with preferred languages (`zh-CN`, `zh-Hans`, `zh`, `en`, then auto)
-2. reuse a custom Worker-side `fetch` so the library's watch-page request also gets consent handling and the InnerTube request carries the extracted API key
-3. classify blocked IPs, age-restricted videos, and PO-token-required tracks more explicitly
-4. merge short transcript fragments into larger prompt-friendly blocks
-
-This path is simpler than the main `json3` parser, but it gives us one more YouTube-native strategy before falling all the way back to public Invidious instances.
-
-### Final path: Invidious
-
-If YouTube direct access fails, the Worker tries multiple Invidious instances:
-
-1. list available caption tracks
-2. select the best track
-3. fetch VTT/body
-4. parse into normalized segments
+There are no additional Worker-side YouTube fallbacks anymore. If this method fails, generation falls back to Gemini's direct video understanding.
 
 ## Browser-First, But Not Browser-Only
 
@@ -157,7 +105,7 @@ Response:
 
 Notes:
 
-1. `source` is `youtube`, `transcript`, or `invidious`.
+1. `source` is typically `transcript`.
 2. `segments` are already normalized and suitable for prompt building.
 
 ### `POST /api/generate`
@@ -209,12 +157,10 @@ Worker router and request lifecycle:
 Owns YouTube caption extraction:
 
 1. videoId parsing
-2. track discovery
-3. `json3` event parsing
-4. sentence-style grouping
-5. timedtext fallback
-6. `youtube-transcript` fallback
-7. Invidious fallback
+2. `youtube-transcript` fetching
+3. caption normalization
+4. block merging
+5. simple in-memory caching
 
 ### [src/page.ts](/Users/xu/projects/youtube-readcast/src/page.ts)
 
@@ -234,29 +180,24 @@ Converts the structured `CaptionPayload` into a Gemini prompt that asks for Chin
 
 | Decision | Why |
 |---|---|
-| Reuse `captionTracks + json3` ideas | More aligned with how YouTube exposes subtitles today |
-| Add `youtube-transcript` as a fallback | Gives us a simpler YouTube-native path before depending on third-party mirrors |
-| Keep Worker proxy layer | Standalone web app cannot reliably copy extension-only same-page interception |
+| Follow `youtube-article-generator` directly | That code path is already known to work for this product shape |
+| Use `youtube-transcript` as the only subtitle strategy | Simpler code is easier to reason about and debug |
 | Let browser request `/api/captions` first | Better UX and avoids duplicate fetches in the common case |
-| Keep timedtext and Invidious fallbacks | YouTube behavior changes often; single-path designs are brittle |
 | Keep Gemini fallback | Some videos still fail all caption strategies |
-| Detect blocked IP / consent / PO-token cases explicitly | Makes failures easier to reason about and avoids masking YouTube-side policy changes as generic empty subtitles |
 
 ## Risks And Mitigations
 
 | Risk | Mitigation |
 |---|---|
-| YouTube changes player metadata format | Fall back from Innertube to watch-page extraction, then timedtext |
-| `json3` returns fragmented events | Group events into larger prompt-friendly segments |
-| Cross-origin browser strategy is unreliable | Do not depend on direct browser fetches to YouTube |
-| Invidious instances go down | Use an ordered instance list |
+| `youtube-transcript` fails for a given video or IP | Fall back to Gemini video prompt |
+| Transcript fragments are too碎 | Merge nearby fragments into larger prompt-friendly blocks |
 | Long transcripts overload the prompt | Prompt builder truncates by character budget |
 
 ## Future Options
 
-If we ever want a truly `kiss-translator`-style frontend path, it would need a different product shape:
+If `youtube-transcript` stops being reliable enough in production, the next realistic step would be a different product shape such as:
 
-1. a browser extension that runs on `youtube.com`, or
-2. an embedded experience hosted inside a YouTube page context
+1. a browser extension running on `youtube.com`, or
+2. a dedicated subtitle proxy service with stronger anti-blocking support
 
-For the current standalone Worker app, the present hybrid architecture is the more stable choice.
+For the current standalone Worker app, the simplified `youtube-transcript` path is the chosen tradeoff.
