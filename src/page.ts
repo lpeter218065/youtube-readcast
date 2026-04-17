@@ -1258,6 +1258,8 @@ export function getPageHtml(): string {
           const sourceLabel =
             payload.source === 'youtube'
               ? 'YouTube 直连'
+              : payload.source === 'transcript'
+                ? 'youtube-transcript 回退'
               : payload.source === 'invidious'
                 ? '备用字幕源'
                 : '浏览器预取'

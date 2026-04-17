@@ -2,9 +2,9 @@
 
 ## Overview
 
-YouTube Readcast is a Cloudflare Worker app that turns a YouTube video with captions into a Chinese reading-style article. The browser streams the final article preview, while the Worker handles subtitle discovery, fallbacks, and Gemini generation.
+YouTube Readcast is a Cloudflare Worker app that turns a YouTube video with captions into a Chinese reading-style article. The browser streams the final article preview, while the Worker handles subtitle discovery, multi-stage fallbacks, and Gemini generation.
 
-The current design borrows subtitle ideas from `/Users/xu/projects/kiss-translator`, but adapts them for a standalone web app rather than a browser extension.
+The current design borrows subtitle ideas from `/Users/xu/projects/kiss-translator`, and also adopts a `youtube-transcript`-style fallback inspired by `/Users/xu/projects/youtube-article-generator`, while adapting both to a standalone web app rather than a browser extension.
 
 ## Why We Did Not Copy `kiss-translator` Directly
 
@@ -33,6 +33,7 @@ The current implementation reuses the spirit of its YouTube flow:
 2. Prefer `captionTracks[].baseUrl` and request `fmt=json3`.
 3. Convert `json3 events` into cleaner sentence-like segments before prompting Gemini.
 4. Keep fallback logic for weaker/older subtitle endpoints.
+5. Add a `youtube-transcript`-style fallback when the direct `captionTracks/json3` path is blocked.
 
 ## Current Architecture
 
@@ -56,7 +57,8 @@ More detailed flow:
    a. YouTube player metadata / captionTracks
    b. captionTrack.baseUrl + fmt=json3
    c. legacy timedtext list + srv3 XML
-   d. Invidious instances
+   d. `youtube-transcript` fallback
+   e. Invidious instances
 5. Browser sends structured CaptionPayload to POST /api/generate
 6. Worker builds Gemini prompt from that payload
 7. Worker streams generated HTML back over SSE
@@ -92,6 +94,16 @@ If `captionTracks + json3` fails, the Worker falls back to:
 3. `fmt=srv3` XML body
 
 This keeps compatibility with videos where player metadata is incomplete but timedtext still works.
+
+### Tertiary path: `youtube-transcript` fallback
+
+If the direct YouTube extraction chain still fails, the Worker tries a `youtube-transcript`-style fallback:
+
+1. request transcript data with preferred languages (`zh-CN`, `zh-Hans`, `zh`, `en`, then auto)
+2. reuse a custom Worker-side `fetch` so the library's InnerTube request also carries the API key and Worker-friendly headers
+3. merge short transcript fragments into larger prompt-friendly blocks
+
+This path is simpler than the main `json3` parser, but it gives us one more YouTube-native strategy before falling all the way back to public Invidious instances.
 
 ### Final path: Invidious
 
@@ -141,7 +153,7 @@ Response:
 
 Notes:
 
-1. `source` is `youtube` or `invidious`.
+1. `source` is `youtube`, `transcript`, or `invidious`.
 2. `segments` are already normalized and suitable for prompt building.
 
 ### `POST /api/generate`
@@ -197,7 +209,8 @@ Owns YouTube caption extraction:
 3. `json3` event parsing
 4. sentence-style grouping
 5. timedtext fallback
-6. Invidious fallback
+6. `youtube-transcript` fallback
+7. Invidious fallback
 
 ### [src/page.ts](/Users/xu/projects/youtube-readcast/src/page.ts)
 
@@ -218,6 +231,7 @@ Converts the structured `CaptionPayload` into a Gemini prompt that asks for Chin
 | Decision | Why |
 |---|---|
 | Reuse `captionTracks + json3` ideas | More aligned with how YouTube exposes subtitles today |
+| Add `youtube-transcript` as a fallback | Gives us a simpler YouTube-native path before depending on third-party mirrors |
 | Keep Worker proxy layer | Standalone web app cannot reliably copy extension-only same-page interception |
 | Let browser request `/api/captions` first | Better UX and avoids duplicate fetches in the common case |
 | Keep timedtext and Invidious fallbacks | YouTube behavior changes often; single-path designs are brittle |

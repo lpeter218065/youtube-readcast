@@ -1,3 +1,11 @@
+import {
+  fetchTranscript,
+  YoutubeTranscriptDisabledError,
+  YoutubeTranscriptNotAvailableError,
+  YoutubeTranscriptNotAvailableLanguageError,
+  YoutubeTranscriptTooManyRequestError,
+  YoutubeTranscriptVideoUnavailableError
+} from 'youtube-transcript/dist/youtube-transcript.esm.js'
 import type { CaptionPayload, CaptionSegment } from '../types'
 import { normalizeCaptionText } from '../utils/text'
 
@@ -13,6 +21,8 @@ const WATCH_HEADERS = {
 const WATCH_TIMEOUT_MS = 15000
 const CAPTION_TIMEOUT_MS = 6000
 const INVIDIOUS_TIMEOUT_MS = 5000
+const INNERTUBE_API_KEY = 'AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8'
+const TRANSCRIPT_LANGUAGES = ['zh-CN', 'zh-Hans', 'zh', 'en'] as const
 
 const INVIDIOUS_INSTANCES = [
   'https://inv.nadeko.net',
@@ -73,6 +83,13 @@ interface FlattenedCaptionEvent {
   end: number
 }
 
+interface YoutubeTranscriptLine {
+  text: string
+  duration: number
+  offset: number
+  lang?: string
+}
+
 export function extractVideoId(input: string): string | null {
   const trimmed = input.trim()
 
@@ -125,8 +142,20 @@ export async function fetchCaptions(
   try {
     return await fetchDirectCaptions(videoId, options)
   } catch (directError) {
-    options.onStatus?.('YouTube 直连失败，切换到备用字幕源…')
-    return fetchInvidiousCaptions(videoId, options, directError)
+    options.onStatus?.('YouTube 直连失败，尝试 youtube-transcript 回退…')
+
+    try {
+      return await fetchTranscriptCaptions(videoId, options)
+    } catch (transcriptError) {
+      options.onStatus?.('youtube-transcript 回退失败，切换到备用字幕源…')
+      return fetchInvidiousCaptions(
+        videoId,
+        options,
+        new Error(
+          `YouTube 直连字幕抓取失败：${toErrorMessage(directError)}；youtube-transcript 回退失败：${toErrorMessage(transcriptError)}`
+        )
+      )
+    }
   }
 }
 
@@ -183,6 +212,47 @@ async function fetchDirectCaptions(
   }
 }
 
+async function fetchTranscriptCaptions(
+  videoId: string,
+  options: FetchCaptionsOptions
+): Promise<CaptionPayload> {
+  const errors: string[] = []
+  const transcriptFetch = createTranscriptFetch(options.signal)
+
+  for (const language of [...TRANSCRIPT_LANGUAGES, null] as Array<string | null>) {
+    try {
+      const transcript = (await fetchTranscript(videoId, {
+        ...(language ? { lang: language } : {}),
+        fetch: transcriptFetch
+      })) as YoutubeTranscriptLine[]
+
+      const segments = mergeTranscriptSegments(transcript)
+
+      if (!segments.length) {
+        continue
+      }
+
+      return {
+        title:
+          (await fetchOEmbedTitle(videoId, options.signal)) ?? `YouTube Video ${videoId}`,
+        language: transcript.find((item) => item.lang)?.lang ?? language ?? 'unknown',
+        source: 'transcript',
+        segments
+      }
+    } catch (error) {
+      if (error instanceof YoutubeTranscriptNotAvailableLanguageError) {
+        continue
+      }
+
+      errors.push(mapTranscriptError(videoId, error))
+    }
+  }
+
+  throw new Error(
+    errors[errors.length - 1] ?? 'youtube-transcript 没有返回可用字幕'
+  )
+}
+
 interface InnertubePlayerResponse {
   captions?: {
     playerCaptionsTracklistRenderer?: {
@@ -212,7 +282,7 @@ async function fetchInnertubePlayer(
 
   try {
     const response = await fetch(
-      'https://www.youtube.com/youtubei/v1/player?prettyPrint=false',
+      `https://www.youtube.com/youtubei/v1/player?key=${INNERTUBE_API_KEY}&prettyPrint=false`,
       {
         method: 'POST',
         headers: {
@@ -945,6 +1015,105 @@ function compactSegments(segments: CaptionSegment[]): CaptionSegment[] {
   return compacted
 }
 
+function mergeTranscriptSegments(lines: YoutubeTranscriptLine[]): CaptionSegment[] {
+  const normalized = lines
+    .map((line) => ({
+      text: normalizeTranscriptLineText(line.text),
+      offset: normalizeTranscriptTimeValue(line.offset),
+      duration: normalizeTranscriptTimeValue(line.duration),
+      lang: line.lang
+    }))
+    .filter((line) => line.text)
+
+  const merged: Array<(typeof normalized)[number]> = []
+
+  for (const line of normalized) {
+    const current = merged[merged.length - 1]
+
+    if (!current) {
+      merged.push({ ...line })
+      continue
+    }
+
+    const gap = line.offset - (current.offset + current.duration)
+    const mergedText = joinTranscriptText(current.text, line.text)
+    const shouldStartNewBlock =
+      mergedText.length > 220 ||
+      (gap > 3500 && looksCompleteSentence(current.text)) ||
+      (looksCompleteSentence(current.text) && current.text.length > 80)
+
+    if (shouldStartNewBlock) {
+      merged.push({ ...line })
+      continue
+    }
+
+    current.text = mergedText
+    current.duration = Math.max(
+      line.offset + line.duration - current.offset,
+      current.duration
+    )
+    current.lang = current.lang ?? line.lang
+  }
+
+  return compactSegments(
+    merged.map((line) => ({
+      start: line.offset / 1000,
+      text: line.text
+    }))
+  )
+}
+
+function normalizeTranscriptLineText(text: string): string {
+  return normalizeCaptionText(text)
+    .replace(/([\u4e00-\u9fff])\s+([\u4e00-\u9fff])/g, '$1$2')
+    .replace(/([\u4e00-\u9fff])\s+([，。！？；：、“”‘’（）])/g, '$1$2')
+    .replace(/([（“‘])\s+([\u4e00-\u9fffA-Za-z0-9])/g, '$1$2')
+    .trim()
+}
+
+function joinTranscriptText(left: string, right: string): string {
+  if (!left) {
+    return right
+  }
+
+  if (!right) {
+    return left
+  }
+
+  if (/[A-Za-z0-9]$/.test(left) && /^[A-Za-z0-9]/.test(right)) {
+    return `${left} ${right}`
+  }
+
+  if (/[-/()]$/.test(left) || /^[,.;:!?%)]/.test(right)) {
+    return `${left}${right}`
+  }
+
+  if (
+    /[\u4e00-\u9fff”’）】》]$/.test(left) ||
+    /^[\u4e00-\u9fff，。！？；：、）】》]/.test(right)
+  ) {
+    return `${left}${right}`
+  }
+
+  return `${left} ${right}`
+}
+
+function looksCompleteSentence(text: string): boolean {
+  return /[。！？.!?…]$/.test(text.trim())
+}
+
+function normalizeTranscriptTimeValue(value: number): number {
+  if (!Number.isFinite(value)) {
+    return 0
+  }
+
+  if (!Number.isInteger(value) || value < 100) {
+    return Math.round(value * 1000)
+  }
+
+  return value
+}
+
 async function fetchInvidiousTrackBody(
   instance: string,
   videoId: string,
@@ -1106,6 +1275,69 @@ async function fetchText(
   } finally {
     requestState.cleanup()
   }
+}
+
+function createTranscriptFetch(parentSignal?: AbortSignal): typeof fetch {
+  return async (input, init) => {
+    const url = toUrl(input)
+    const headers = new Headers(url.hostname.endsWith('youtube.com') ? WATCH_HEADERS : undefined)
+    const initHeaders = new Headers(init?.headers)
+    let timeoutMs = CAPTION_TIMEOUT_MS
+
+    initHeaders.forEach((value, key) => {
+      headers.set(key, value)
+    })
+
+    if (url.hostname.endsWith('youtube.com') && url.pathname === '/youtubei/v1/player') {
+      url.searchParams.set('key', INNERTUBE_API_KEY)
+      timeoutMs = WATCH_TIMEOUT_MS
+    } else if (url.hostname.endsWith('youtube.com') && url.pathname === '/watch') {
+      timeoutMs = WATCH_TIMEOUT_MS
+    }
+
+    const requestState = createTimedSignal(parentSignal, timeoutMs)
+
+    try {
+      return await fetch(url, {
+        ...init,
+        headers,
+        signal: requestState.signal
+      })
+    } finally {
+      requestState.cleanup()
+    }
+  }
+}
+
+function toUrl(input: RequestInfo | URL): URL {
+  if (input instanceof URL) {
+    return new URL(input.toString())
+  }
+
+  if (typeof input === 'string') {
+    return new URL(input)
+  }
+
+  return new URL(input.url)
+}
+
+function mapTranscriptError(videoId: string, error: unknown): string {
+  if (error instanceof YoutubeTranscriptTooManyRequestError) {
+    return 'YouTube 当前限制过多请求，暂时无法通过 youtube-transcript 抓取字幕'
+  }
+
+  if (error instanceof YoutubeTranscriptVideoUnavailableError) {
+    return `视频不可用：${videoId}`
+  }
+
+  if (
+    error instanceof YoutubeTranscriptDisabledError ||
+    error instanceof YoutubeTranscriptNotAvailableError
+  ) {
+    return '该视频没有公开字幕'
+  }
+
+  return toErrorMessage(error).replace(/^\[YoutubeTranscript\]\s*🚨\s*/u, '')
 }
 
 function createTimedSignal(parentSignal: AbortSignal | undefined, timeoutMs: number) {

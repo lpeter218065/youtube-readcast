@@ -174,7 +174,10 @@ function getClientCaptions(input: unknown): CaptionPayload | null {
   const title = typeof data.title === 'string' ? data.title.trim() : ''
   const language = typeof data.language === 'string' ? data.language.trim() : ''
   const source =
-    data.source === 'youtube' || data.source === 'invidious' || data.source === 'client'
+    data.source === 'youtube' ||
+    data.source === 'transcript' ||
+    data.source === 'invidious' ||
+    data.source === 'client'
       ? data.source
       : null
   const segments = Array.isArray(data.segments)

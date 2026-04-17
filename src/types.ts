@@ -1,4 +1,4 @@
-export type CaptionSource = 'youtube' | 'invidious' | 'client'
+export type CaptionSource = 'youtube' | 'transcript' | 'invidious' | 'client'
 
 export interface CaptionSegment {
   start: number
