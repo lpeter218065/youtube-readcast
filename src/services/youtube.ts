@@ -73,35 +73,6 @@ interface FlattenedCaptionEvent {
   end: number
 }
 
-interface YouTubeTranscriptResponse {
-  actions?: Array<{
-    updateEngagementPanelAction?: {
-      content?: {
-        transcriptRenderer?: {
-          content?: {
-            transcriptSearchPanelRenderer?: {
-              body?: {
-                transcriptSegmentListRenderer?: {
-                  initialSegments?: Array<{
-                    transcriptSegmentRenderer?: {
-                      startMs?: string
-                      endMs?: string
-                      snippet?: {
-                        runs?: Array<{ text?: string }>
-                        simpleText?: string
-                      }
-                    }
-                  }>
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-  }>
-}
-
 export function extractVideoId(input: string): string | null {
   const trimmed = input.trim()
 
@@ -184,21 +155,7 @@ async function fetchDirectCaptions(
   }
 
   if (!segments.length) {
-    options.onStatus?.('字幕轨拉取失败，尝试 transcript 接口…')
-
-    try {
-      const transcriptResult = await fetchTranscriptApiCaptions(videoId, options.signal)
-      language = transcriptResult.language
-      segments = transcriptResult.segments
-    } catch (transcriptError) {
-      discoveryError = new Error(
-        `${toErrorMessage(discoveryError)}；transcript 接口失败：${toErrorMessage(transcriptError)}`
-      )
-    }
-  }
-
-  if (!segments.length) {
-    options.onStatus?.('transcript 接口失败，回退到 timedtext 列表接口…')
+    options.onStatus?.('字幕轨拉取失败，回退到 timedtext 列表接口…')
 
     try {
       const legacyResult = await fetchLegacyTimedTextCaptions(videoId, options.signal)
@@ -238,8 +195,9 @@ interface InnertubePlayerResponse {
 }
 
 interface InnertubeClientConfig {
-  clientName: 'WEB' | 'WEB_EMBEDDED_PLAYER'
+  clientName: 'ANDROID' | 'WEB' | 'WEB_EMBEDDED_PLAYER'
   clientVersion: string
+  userAgent?: string
   thirdParty?: {
     embedUrl: string
   }
@@ -259,7 +217,7 @@ async function fetchInnertubePlayer(
         method: 'POST',
         headers: {
           'content-type': 'application/json',
-          'user-agent': WATCH_HEADERS['user-agent']
+          'user-agent': client.userAgent ?? WATCH_HEADERS['user-agent']
         },
         body: JSON.stringify({
           videoId,
@@ -268,7 +226,15 @@ async function fetchInnertubePlayer(
               hl: 'en',
               gl: 'US',
               clientName: client.clientName,
-              clientVersion: client.clientVersion
+              clientVersion: client.clientVersion,
+              ...(client.clientName === 'ANDROID'
+                ? {
+                    androidSdkVersion: 30,
+                    userAgent:
+                      client.userAgent ??
+                      'com.google.android.youtube/20.10.38 (Linux; U; Android 11) gzip'
+                  }
+                : {})
             },
             ...(client.thirdParty ? { thirdParty: client.thirdParty } : {})
           },
@@ -360,6 +326,12 @@ async function discoverYouTubeCaptionState(
 
   const clients: InnertubeClientConfig[] = [
     {
+      clientName: 'ANDROID',
+      clientVersion: '20.10.38',
+      userAgent:
+        'com.google.android.youtube/20.10.38 (Linux; U; Android 11) gzip'
+    },
+    {
       clientName: 'WEB',
       clientVersion: '2.20241126.01.00'
     },
@@ -417,9 +389,13 @@ async function discoverYouTubeCaptionState(
 
 function extractCaptionTracks(playerResponse: InnertubePlayerResponse): YouTubeTrack[] {
   return (
-    playerResponse.captions?.playerCaptionsTracklistRenderer?.captionTracks?.filter(
-      (track) => Boolean(track?.baseUrl)
-    ) ?? []
+    (
+      playerResponse.captions?.playerCaptionsTracklistRenderer?.captionTracks ??
+      (playerResponse as unknown as {
+        playerCaptionsTracklistRenderer?: { captionTracks?: YouTubeTrack[] }
+      }).playerCaptionsTracklistRenderer?.captionTracks ??
+      []
+    ).filter((track) => Boolean(track?.baseUrl))
   )
 }
 
@@ -509,155 +485,6 @@ async function fetchLegacyTimedTextCaptions(
     language: bestLang,
     segments
   }
-}
-
-async function fetchTranscriptApiCaptions(
-  videoId: string,
-  parentSignal?: AbortSignal
-): Promise<{ language: string; segments: CaptionSegment[] }> {
-  const candidates = [
-    { language: 'en', automatic: false },
-    { language: 'en', automatic: true },
-    { language: 'zh', automatic: false },
-    { language: 'zh', automatic: true }
-  ]
-
-  let lastError: unknown = null
-
-  for (const candidate of candidates) {
-    try {
-      const params = buildTranscriptParams(
-        videoId,
-        candidate.language,
-        candidate.automatic
-      )
-
-      const data = (await fetchJson(
-        'https://www.youtube.com/youtubei/v1/get_transcript?prettyPrint=false',
-        CAPTION_TIMEOUT_MS,
-        parentSignal,
-        {
-          'content-type': 'application/json',
-          'user-agent': WATCH_HEADERS['user-agent']
-        },
-        JSON.stringify({
-          context: {
-            client: {
-              hl: 'en',
-              gl: 'US',
-              clientName: 'WEB',
-              clientVersion: '2.20241126.01.00'
-            }
-          },
-          params
-        }),
-        'POST'
-      )) as YouTubeTranscriptResponse
-
-      const segments = parseTranscriptApiResponse(data)
-
-      if (segments.length) {
-        return {
-          language: candidate.language,
-          segments: compactSegments(segments)
-        }
-      }
-
-      lastError = new Error(
-        `transcript ${candidate.language}${candidate.automatic ? ' asr' : ''} 返回空数据`
-      )
-    } catch (error) {
-      lastError = error
-    }
-  }
-
-  throw new Error(toErrorMessage(lastError))
-}
-
-function parseTranscriptApiResponse(data: YouTubeTranscriptResponse): CaptionSegment[] {
-  const entries =
-    data.actions
-      ?.flatMap((action) =>
-        action.updateEngagementPanelAction?.content?.transcriptRenderer?.content?.transcriptSearchPanelRenderer?.body?.transcriptSegmentListRenderer?.initialSegments ??
-        []
-      ) ?? []
-
-  const segments: CaptionSegment[] = []
-
-  for (const entry of entries) {
-    const renderer = entry.transcriptSegmentRenderer
-
-    if (!renderer) {
-      continue
-    }
-
-    const text = normalizeCaptionText(
-      renderer.snippet?.simpleText ??
-      renderer.snippet?.runs?.map((run) => run.text ?? '').join(' ') ??
-      ''
-    )
-    const startMs = Number.parseInt(renderer.startMs ?? '', 10)
-
-    if (!text || Number.isNaN(startMs)) {
-      continue
-    }
-
-    segments.push({
-      start: startMs / 1000,
-      text
-    })
-  }
-
-  return segments
-}
-
-function buildTranscriptParams(
-  videoId: string,
-  language: string,
-  automatic: boolean
-): string {
-  const inner: number[] = []
-
-  if (automatic) {
-    inner.push(...encodeProtoString(1, 'asr'))
-  }
-
-  inner.push(...encodeProtoString(2, language))
-
-  const outer = [
-    ...encodeProtoString(1, videoId),
-    ...encodeProtoString(2, bytesToBase64(new Uint8Array(inner)))
-  ]
-
-  return bytesToBase64(new Uint8Array(outer))
-}
-
-function encodeProtoString(fieldNumber: number, value: string): number[] {
-  const encoded = new TextEncoder().encode(value)
-  return [((fieldNumber << 3) | 2), ...encodeVarint(encoded.length), ...encoded]
-}
-
-function encodeVarint(value: number): number[] {
-  const bytes: number[] = []
-  let current = value >>> 0
-
-  while (current >= 0x80) {
-    bytes.push((current & 0x7f) | 0x80)
-    current >>>= 7
-  }
-
-  bytes.push(current)
-  return bytes
-}
-
-function bytesToBase64(bytes: Uint8Array): string {
-  let binary = ''
-
-  for (const byte of bytes) {
-    binary += String.fromCharCode(byte)
-  }
-
-  return btoa(binary)
 }
 
 function extractEmbeddedJson(source: string, anchor: string): unknown | null {
