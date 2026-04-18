@@ -15,6 +15,13 @@ const PREFERRED_LANGUAGES = ['zh-CN', 'zh-Hans', 'zh', 'en'] as const
 const BLOCK_MAX_CHARS = 220
 const CAPTION_CACHE_TTL_MS = 12 * 60 * 60 * 1000
 
+const INVIDIOUS_INSTANCES = [
+  'https://inv.nadeko.net',
+  'https://invidious.nerdvpn.de',
+  'https://yt.artemislena.eu',
+  'https://invidious.flokinet.to'
+] as const
+
 const captionCache = new Map<
   string,
   {
@@ -119,6 +126,15 @@ export async function fetchCaptions(
 
       errors.push(mapTranscriptError(videoId, error))
     }
+  }
+
+  // Fallback: try Invidious instances
+  try {
+    const payload = await fetchCaptionsFromInvidious(videoId, options)
+    setCachedCaptions(videoId, payload)
+    return payload
+  } catch (invErr) {
+    errors.push(invErr instanceof Error ? invErr.message : 'Invidious 失败')
   }
 
   throw new Error(errors[errors.length - 1] ?? '字幕获取失败')
@@ -323,4 +339,92 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
       (e) => { clearTimeout(id); reject(e) }
     )
   })
+}
+
+interface InvidiousCaption {
+  label: string
+  language_code: string
+  url: string
+}
+
+async function fetchCaptionsFromInvidious(
+  videoId: string,
+  options: FetchCaptionsOptions
+): Promise<CaptionPayload> {
+  for (const instance of INVIDIOUS_INSTANCES) {
+    throwIfAborted(options.signal)
+    options.onStatus?.(`尝试通过 Invidious (${new URL(instance).hostname}) 获取字幕…`)
+
+    try {
+      const listResp = await withTimeout(
+        fetch(`${instance}/api/v1/captions/${videoId}`, { signal: options.signal }),
+        6000
+      )
+      if (!listResp.ok) continue
+
+      const { captions = [] } = (await listResp.json()) as { captions?: InvidiousCaption[] }
+      if (!captions.length) continue
+
+      const chosen =
+        captions.find((c) => c.language_code.startsWith('zh')) ??
+        captions.find((c) => c.language_code.startsWith('en')) ??
+        captions[0]
+
+      if (!chosen) continue
+
+      const vttResp = await withTimeout(
+        fetch(
+          `${instance}/api/v1/captions/${videoId}?label=${encodeURIComponent(chosen.label)}`,
+          { signal: options.signal }
+        ),
+        6000
+      )
+      if (!vttResp.ok) continue
+
+      const vttText = await vttResp.text()
+      const segments = parseVtt(vttText)
+      if (!segments.length) continue
+
+      const title =
+        (await fetchOEmbedTitle(videoId, options.signal)) ?? `YouTube Video ${videoId}`
+
+      return { title, language: chosen.language_code, source: 'invidious', segments }
+    } catch {
+      continue
+    }
+  }
+
+  throw new Error('所有 Invidious 实例均无法获取字幕')
+}
+
+function parseVtt(vtt: string): Array<{ start: number; text: string }> {
+  const segments: Array<{ start: number; text: string }> = []
+
+  for (const block of vtt.split(/\n\n+/)) {
+    const lines = block.trim().split('\n')
+    const tsIdx = lines.findIndex((l) => l.includes('-->'))
+    if (tsIdx === -1) continue
+
+    const match = lines[tsIdx].match(/^(\d{2}):(\d{2}):(\d{2})[.,](\d{3})/)
+    if (!match) continue
+
+    const start =
+      parseInt(match[1]) * 3600 +
+      parseInt(match[2]) * 60 +
+      parseInt(match[3]) +
+      parseInt(match[4]) / 1000
+
+    const text = lines
+      .slice(tsIdx + 1)
+      .join(' ')
+      .replace(/<[^>]+>/g, '')
+      .replace(/&amp;/g, '&')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .trim()
+
+    if (text) segments.push({ start, text })
+  }
+
+  return segments
 }
