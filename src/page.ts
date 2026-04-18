@@ -1067,7 +1067,7 @@ export function getPageHtml(): string {
         return null
       }
 
-      async function fetchCaptionsClientSide(videoUrl, signal) {
+      async function prefetchCaptions(videoUrl, signal) {
         const videoId = extractVideoIdFromUrl(videoUrl)
         if (!videoId) throw new Error('Invalid URL')
 
@@ -1122,19 +1122,25 @@ export function getPageHtml(): string {
         logStatus('请求已发出，等待 Worker 响应。')
         scheduleRender(PLACEHOLDER_HTML)
 
-        // Try to extract captions client-side first
+        // Try to prefetch captions before starting generation.
         let captions = null
+        let captionError = ''
         try {
-          logStatus('尝试从浏览器端获取字幕…')
-          captions = await fetchCaptionsClientSide(url, activeController.signal)
-          logStatus('浏览器端字幕预取成功。', 'success')
+          logStatus('尝试预取字幕…')
+          captions = await prefetchCaptions(url, activeController.signal)
+          logStatus('字幕预取成功。', 'success')
         } catch (e) {
-          const message = e instanceof Error ? e.message : '未知错误'
-          logStatus('浏览器端字幕提取失败：' + message + '，将由服务端处理。')
+          captionError = e instanceof Error ? e.message : '未知错误'
+          logStatus('字幕预取失败：' + captionError + '，将直接回退到 Gemini。')
         }
 
         try {
-          const payload = { url, apiKey, captions: captions || undefined }
+          const payload = {
+            url,
+            apiKey,
+            captions: captions || undefined,
+            captionError: captions ? undefined : captionError || undefined
+          }
           const response = await fetch('/api/generate', {
             method: 'POST',
             headers: {

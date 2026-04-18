@@ -87,6 +87,7 @@ async function handleGenerate(request: Request): Promise<Response> {
         let prompt: string
 
         const clientCaptions = getClientCaptions(body?.captions)
+        const prefetchedCaptionError = body?.captionError?.trim()
         const clientTranscript = body?.transcript?.trim()
 
         // If the browser already prepared structured captions, use them directly.
@@ -108,6 +109,11 @@ async function handleGenerate(request: Request): Promise<Response> {
             source: 'client',
             segments: [{ start: 0, text: clientTranscript }]
           })
+        } else if (prefetchedCaptionError) {
+          send('status', {
+            message: `字幕预取失败：${prefetchedCaptionError}；直接改用 Gemini 解析…`
+          })
+          prompt = buildVideoPrompt(videoId)
         } else {
           try {
             const captions = await fetchCaptions(videoId, {
