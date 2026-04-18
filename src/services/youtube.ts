@@ -81,9 +81,9 @@ export async function fetchCaptions(
         options.onStatus?.(`尝试字幕语言 ${language}…`)
       }
 
-      const transcript = (await fetchTranscript(
-        videoId,
-        language ? { lang: language } : {}
+      const transcript = (await withTimeout(
+        fetchTranscript(videoId, language ? { lang: language } : {}),
+        5000
       )) as TranscriptLine[]
 
       throwIfAborted(options.signal)
@@ -313,4 +313,14 @@ function throwIfAborted(signal?: AbortSignal): void {
       ? signal.reason
       : new Error('请求已取消')
   }
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const id = setTimeout(() => reject(new Error(`超时 (${ms}ms)`)), ms)
+    promise.then(
+      (v) => { clearTimeout(id); resolve(v) },
+      (e) => { clearTimeout(id); reject(e) }
+    )
+  })
 }
