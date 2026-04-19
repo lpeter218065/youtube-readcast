@@ -1,75 +1,99 @@
+# Readcast
 
-
+将 YouTube 视频转换为中文阅读稿的 Web 应用。
 
 https://github.com/user-attachments/assets/cbb4b7fb-9a05-4c31-a389-638d1e381696
 
+## 功能特点
 
+- 🎬 **自动提取字幕** — 支持 YouTube 官方字幕和多个镜像源
+- 📝 **AI 生成文章** — 将字幕转换为结构化的中文阅读稿
+- 🌊 **流式显示** — 字幕和生成内容实时流式推送到前端
+- 🔄 **多 AI 提供商** — 支持 Gemini、Claude、OpenAI（根据 API key 自动识别）
+- 🎨 **优雅界面** — 简洁的琥珀色调设计，适合长文阅读
 
+## 在线使用
 
+访问：https://yt-dialogue-generator.lpeter82218065.workers.dev
 
+1. 粘贴 YouTube 视频链接
+2. 输入 AI API Key（首次使用时）
+3. 点击"生成"，等待字幕提取和文章生成
 
-# YouTube Dialogue Article Generator
+## API Key 支持
 
-一个基于 Node.js 开发、部署到 Cloudflare Workers 的单页应用：
+根据 API key 前缀自动识别提供商：
 
-- 输入带字幕的 YouTube 视频链接
-- Worker 抓取字幕
-- 调用 Gemini AI Studio API
-- 将视频对话整理为中文 HTML 文章
-- 以流式方式边生成边展示
-
-## 特点
-
-- 无框架 Worker 架构，依赖极少
-- 双字幕策略：YouTube 直连 + Invidious 备用回退
-- Gemini 流式转发，前端实时渲染
-- 编辑感较强的中文对话排版，适合长文阅读
-- API Key 由用户输入，仅保存在浏览器本地
+- **Gemini**（默认）：`AIza...` 或其他格式
+- **Claude**：`cr_...` 开头
+- **OpenAI**：`sk-...` 开头
 
 ## 本地开发
 
 ```bash
+# 安装依赖
 npm install
-npm run dev
+
+# 本地开发（需要代理访问外网）
+HTTPS_PROXY=http://127.0.0.1:7897 npx wrangler dev
+
+# 部署到 Cloudflare Workers
+npx wrangler deploy
 ```
 
-打开 Wrangler 输出的本地地址即可。
+## 技术栈
 
-## 部署
+- **运行时**：Cloudflare Workers
+- **字幕获取**：youtube-transcript + Invidious/Piped 镜像
+- **AI 生成**：Gemini / Claude / OpenAI API
+- **前端**：原生 HTML/CSS/JS，无框架依赖
 
-```bash
-npm run deploy
+## 字幕获取策略
+
+1. **inv.nadeko.net**（优先，重试 3 次）
+2. **YouTube 直连**（尝试多种语言：zh-CN, zh-Hans, zh, en, 自动检测）
+3. **其他镜像源**（Invidious 和 Piped 实例并行竞速）
+
+## 工作流程
+
 ```
-
-部署前请确认你已经通过 Wrangler 登录 Cloudflare 账号。
-
-## 使用说明
-
-1. 打开页面
-2. 输入带字幕的 YouTube 视频链接
-3. 输入 Gemini AI Studio API Key
-4. 点击生成
-5. 页面会实时显示整理中的中文文章
+用户输入 URL
+    ↓
+提取字幕（流式状态更新）
+    ↓
+字幕分批流式推送到前端（每批 8 段）
+    ↓
+AI 生成中文排版稿（流式输出）
+    ↓
+前端实时渲染文章
+```
 
 ## 技术结构
 
 ```text
 src/
-├── index.ts
-├── page.ts
-├── prompt.ts
-├── types.ts
+├── index.ts          # Worker 入口，路由处理
+├── page.ts           # 前端 HTML/CSS/JS
+├── prompt.ts         # AI prompt 模板
+├── types.ts          # TypeScript 类型定义
 ├── services/
-│   ├── gemini.ts
-│   └── youtube.ts
+│   ├── gemini.ts     # AI 生成服务（支持 Gemini/Claude/OpenAI）
+│   └── youtube.ts    # 字幕获取服务
 └── utils/
-    ├── sse.ts
-    └── text.ts
+    ├── sse.ts        # Server-Sent Events 工具
+    └── text.ts       # 文本处理工具
 ```
 
-## 说明
+## 配置
 
-- 默认使用 `gemini-2.5-flash`
-- `gemini-2.0-flash` 已在 Google 官方定价页标记为将于 2026-06-01 下线，因此这里直接使用更新的稳定模型
-- Worker 端不保存任何 Gemini 密钥
+编辑 `wrangler.toml` 修改 Worker 配置：
 
+```toml
+name = "yt-dialogue-generator"
+main = "src/index.ts"
+compatibility_date = "2024-12-01"
+```
+
+## 许可证
+
+MIT

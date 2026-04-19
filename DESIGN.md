@@ -2,91 +2,125 @@
 
 ## Overview
 
-YouTube Readcast is a Cloudflare Worker app that turns a YouTube video with captions into a Chinese reading-style article. The browser streams the final article preview, while the Worker handles subtitle fetching and Gemini generation.
-
-The current subtitle implementation now follows `/Users/xu/projects/youtube-article-generator` directly: use `youtube-transcript`, try preferred languages in order, normalize fragments, merge them into larger reading-friendly blocks, then prompt Gemini.
-
-## Why We Simplified The Subtitle Path
-
-Earlier iterations tried multiple YouTube-specific extraction paths such as:
-
-1. `youtubei/v1/player`
-2. watch-page metadata parsing
-3. legacy `timedtext`
-4. public Invidious fallbacks
-
-That made the code much harder to reason about, while the project `/Users/xu/projects/youtube-article-generator` already demonstrated that a much simpler `youtube-transcript`-based approach can work end-to-end for this product.
-
-The design is intentionally simpler now:
-
-1. Keep the browser-first request flow.
-2. Let the Worker fetch subtitles through `youtube-transcript`.
-3. If subtitles still cannot be fetched, fall back to the Gemini video prompt.
+YouTube Readcast is a Cloudflare Worker app that turns a YouTube video with captions into a Chinese reading-style article. The browser streams both the raw captions and the final article preview, while the Worker handles subtitle fetching and AI generation.
 
 ## Current Architecture
 
 ```text
 Browser (SPA)
   ├── GET /                  -> inline app shell
-  ├── POST /api/captions     -> fetch structured captions first
-  └── POST /api/generate     -> SSE article stream
-                                ├── use browser-prepared captions when available
-                                ├── otherwise fetch captions in Worker
+  ├── POST /api/captions     -> fetch structured captions (optional)
+  └── POST /api/generate     -> SSE stream (status → captions → article chunks)
+                                ├── fetch captions with prioritized strategy
+                                ├── stream caption segments to frontend
+                                ├── generate article with AI (Gemini/Claude/OpenAI)
                                 └── fall back to Gemini video prompt if captions fail
 ```
 
-More detailed flow:
-
-```text
-1. User submits YouTube URL + Gemini API key
-2. Browser extracts videoId locally
-3. Browser calls POST /api/captions
-4. Worker fetches captions with this order:
-   a. `youtube-transcript` with preferred languages
-   b. merge transcript fragments into larger text blocks
-5. Browser sends structured CaptionPayload to POST /api/generate
-6. Worker builds Gemini prompt from that payload
-7. Worker streams generated HTML back over SSE
-8. Browser renders the article incrementally in the preview iframe
-```
-
-## Caption Strategy
-
-### Single path: `youtube-transcript`
+## Caption Fetching Strategy
 
 Implemented in [src/services/youtube.ts](/Users/xu/projects/youtube-readcast/src/services/youtube.ts).
 
-The Worker now follows the same core method as `/Users/xu/projects/youtube-article-generator`:
+### Three-tier fallback system:
 
-1. call `fetchTranscript(videoId, { lang })` from `youtube-transcript`
-2. try languages in this order: `zh-CN`, `zh-Hans`, `zh`, `en`, then auto
-3. normalize subtitle fragments
-4. merge nearby fragments into longer reading-friendly blocks
-5. convert them into our `CaptionPayload`
+1. **inv.nadeko.net** (priority, retry 3 times)
+   - Known reliable Invidious instance
+   - Each failure reports specific error reason
+   
+2. **YouTube direct via youtube-transcript**
+   - Try languages in order: `zh-CN`, `zh-Hans`, `zh`, `en`, auto-detect
+   - 5-second timeout per language attempt
+   - Normalize and merge fragments into reading-friendly blocks
+   
+3. **Other mirror sources** (parallel race)
+   - Remaining Invidious instances (yewtu.be, invidious.nerdvpn.de, etc.)
+   - Piped API instances (api.piped.yt, pipedapi.reallyaweso.me, etc.)
+   - Use `Promise.any()` to return first successful result
 
-There are no additional Worker-side YouTube fallbacks anymore. If this method fails, generation falls back to Gemini's direct video understanding.
+### Caption streaming to frontend
 
-## Browser-First, But Not Browser-Only
+Once captions are fetched, they're streamed to the browser in batches:
 
-The browser now prepares captions first by calling `/api/captions`, then sends the returned `CaptionPayload` into `/api/generate`.
+```javascript
+// Server sends caption events
+for (let i = 0; i < segments.length; i += 8) {
+  send('captions', { segments: segments.slice(i, i + 8) })
+}
+```
 
-That gives us the benefits of a "frontend-first" flow:
+Frontend displays the raw transcript text before AI generation starts, providing immediate feedback.
 
-1. one subtitle fetch before generation
-2. better user feedback earlier in the request
-3. generate endpoint can skip re-fetching when the browser already has captions
+## Multi-Provider AI Support
 
-But it is still not "browser-only", because the Worker remains the stable proxy and fallback layer.
+Implemented in [src/services/gemini.ts](/Users/xu/projects/youtube-readcast/src/services/gemini.ts).
+
+The system auto-detects AI provider by API key prefix:
+
+| Prefix | Provider | Endpoint |
+|--------|----------|----------|
+| `cr_` | Claude (custom) | `https://cursor.scihub.edu.kg/api/v1/chat/completions` |
+| `sk-` | OpenAI-compatible | `https://api.hanbbq.top/v1/chat/completions` |
+| default | Gemini | `https://generativelanguage.googleapis.com/v1beta/models/` |
+
+All providers use streaming responses for real-time article generation.
+
+## Request Flow
+
+```text
+1. User submits YouTube URL + API key
+2. Worker extracts videoId
+3. Worker attempts caption fetching (with status updates):
+   a. Try inv.nadeko.net (3 attempts)
+   b. Try YouTube direct (5 languages)
+   c. Try other mirrors (parallel)
+4. Stream caption segments to frontend (SSE captions events)
+5. Build AI prompt from captions
+6. Stream generated HTML back (SSE chunk events)
+7. Browser renders article incrementally
+```
 
 ## API Contracts
 
-### `POST /api/captions`
+### `POST /api/generate`
 
 Request:
 
 ```json
 {
-  "videoId": "xRh2sVcNXQ8"
+  "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+  "apiKey": "AIza..." // or "cr_..." or "sk-..."
+}
+```
+
+SSE Response events:
+
+```text
+event: status
+data: {"message": "尝试 inv.nadeko.net 获取字幕（第 1 次）…"}
+
+event: meta
+data: {"title": "Video Title", "language": "en", "source": "transcript"}
+
+event: captions
+data: {"segments": [{"start": 1.36, "text": "..."}]}
+
+event: chunk
+data: {"html": "<article>..."}
+
+event: done
+data: {"ok": true}
+
+event: error
+data: {"message": "error details"}
+```
+
+### `POST /api/captions` (optional standalone endpoint)
+
+Request:
+
+```json
+{
+  "videoId": "dQw4w9WgXcQ"
 }
 ```
 
@@ -96,108 +130,90 @@ Response:
 {
   "title": "Video title",
   "language": "en",
-  "source": "youtube",
+  "source": "transcript",
   "segments": [
     { "start": 0, "text": "..." }
   ]
 }
 ```
 
-Notes:
-
-1. `source` is typically `transcript`.
-2. `segments` are already normalized and suitable for prompt building.
-
-### `POST /api/generate`
-
-Request:
-
-```json
-{
-  "url": "https://www.youtube.com/watch?v=xRh2sVcNXQ8",
-  "apiKey": "AIza...",
-  "captions": {
-    "title": "Video title",
-    "language": "en",
-    "source": "youtube",
-    "segments": [
-      { "start": 0, "text": "..." }
-    ]
-  }
-}
-```
-
-Fallback request shape still supported:
-
-```json
-{
-  "url": "https://www.youtube.com/watch?v=xRh2sVcNXQ8",
-  "apiKey": "AIza..."
-}
-```
-
-Behavior:
-
-1. If `captions` is present and valid, the Worker uses it directly.
-2. Otherwise the Worker tries `fetchCaptions(videoId)`.
-3. If subtitle extraction fails completely, the Worker falls back to the Gemini video prompt.
-
 ## Key Files
 
 ### [src/index.ts](/Users/xu/projects/youtube-readcast/src/index.ts)
 
 Worker router and request lifecycle:
-
-1. serves the page
-2. returns structured captions
-3. streams generation output over SSE
+- Serves the page
+- Handles `/api/generate` SSE streaming
+- Handles `/api/captions` standalone endpoint
+- Manages caption streaming to frontend
 
 ### [src/services/youtube.ts](/Users/xu/projects/youtube-readcast/src/services/youtube.ts)
 
-Owns YouTube caption extraction:
+Caption extraction with prioritized fallback:
+- videoId parsing
+- inv.nadeko.net with retry logic
+- youtube-transcript with language fallback
+- Invidious/Piped mirror racing
+- VTT parsing
+- Caption normalization and block merging
+- In-memory caching (12-hour TTL)
 
-1. videoId parsing
-2. `youtube-transcript` fetching
-3. caption normalization
-4. block merging
-5. simple in-memory caching
+### [src/services/gemini.ts](/Users/xu/projects/youtube-readcast/src/services/gemini.ts)
+
+Multi-provider AI generation:
+- Auto-detect provider by API key prefix
+- Gemini streaming (SSE format)
+- Claude streaming (OpenAI-compatible format)
+- OpenAI streaming (chat completions format)
+- Unified streaming interface
 
 ### [src/page.ts](/Users/xu/projects/youtube-readcast/src/page.ts)
 
-Owns the browser app:
-
-1. input handling
-2. client-side videoId extraction
-3. browser-first `/api/captions` request
-4. `/api/generate` SSE consumption
-5. live preview rendering
+Browser app with streaming UI:
+- Input handling and API key storage (localStorage)
+- SSE event parsing and handling
+- Caption preview rendering (before AI generation)
+- Article streaming and live rendering
+- Progress bar updates
 
 ### [src/prompt.ts](/Users/xu/projects/youtube-readcast/src/prompt.ts)
 
-Converts the structured `CaptionPayload` into a Gemini prompt that asks for Chinese editorial HTML output.
+Converts structured `CaptionPayload` into AI prompts for Chinese editorial HTML output.
 
 ## Design Decisions
 
 | Decision | Why |
 |---|---|
-| Follow `youtube-article-generator` directly | That code path is already known to work for this product shape |
-| Use `youtube-transcript` as the only subtitle strategy | Simpler code is easier to reason about and debug |
-| Let browser request `/api/captions` first | Better UX and avoids duplicate fetches in the common case |
-| Keep Gemini fallback | Some videos still fail all caption strategies |
+| Stream captions to frontend first | Immediate user feedback, shows progress |
+| Three-tier caption fallback | Maximize success rate across different network conditions |
+| Retry inv.nadeko.net 3 times | Known reliable source, worth retrying |
+| Multi-provider AI support | Flexibility for users with different API access |
+| Auto-detect provider by key prefix | Zero configuration, seamless switching |
+| Batch caption segments (8 per event) | Balance between streaming feel and event overhead |
+| 5% progress increments | Smoother progress bar, doesn't saturate before generation |
 
 ## Risks And Mitigations
 
 | Risk | Mitigation |
 |---|---|
-| `youtube-transcript` fails for a given video or IP | Fall back to Gemini video prompt |
-| Transcript fragments are too碎 | Merge nearby fragments into larger prompt-friendly blocks |
-| Long transcripts overload the prompt | Prompt builder truncates by character budget |
+| All caption sources fail | Fall back to Gemini video prompt (direct analysis) |
+| Invidious instances return empty VTT | Defensive parsing, skip to next source |
+| youtube-transcript rate limited | Multiple fallback sources in parallel |
+| Long transcripts overload prompt | Prompt builder truncates by character budget |
+| Custom proxy endpoints unstable | Graceful error handling, clear error messages |
 
 ## Future Options
 
-If `youtube-transcript` stops being reliable enough in production, the next realistic step would be a different product shape such as:
+1. **Add more mirror sources** — Expand Invidious/Piped instance list
+2. **Client-side caption extraction** — Browser extension or userscript
+3. **Caching layer** — Redis/KV for caption results
+4. **Webhook support** — Async processing for long videos
+5. **Multi-language output** — Support languages beyond Chinese
 
-1. a browser extension running on `youtube.com`, or
-2. a dedicated subtitle proxy service with stronger anti-blocking support
+## Performance Characteristics
 
-For the current standalone Worker app, the simplified `youtube-transcript` path is the chosen tradeoff.
+- **Caption fetch**: 2-15 seconds (depends on source availability)
+- **Caption streaming**: ~100ms per batch (8 segments)
+- **AI generation**: 10-60 seconds (depends on video length and provider)
+- **Total time**: 15-75 seconds for typical 10-minute video
+
