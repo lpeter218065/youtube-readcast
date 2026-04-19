@@ -1,3 +1,13 @@
+
+
+
+https://github.com/user-attachments/assets/cbb4b7fb-9a05-4c31-a389-638d1e381696
+
+
+
+
+
+
 # YouTube Dialogue Article Generator
 
 一个基于 Node.js 开发、部署到 Cloudflare Workers 的单页应用：
