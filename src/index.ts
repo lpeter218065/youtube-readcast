@@ -52,6 +52,10 @@ export default {
       return handleCaptions(request)
     }
 
+    if (request.method === 'GET' && url.pathname === '/api/debug') {
+      return handleDebug(url)
+    }
+
     return jsonResponse({ error: 'Not Found' }, 404)
   }
 }
@@ -126,6 +130,13 @@ async function handleGenerate(request: Request): Promise<Response> {
               language: captions.language,
               source: captions.source
             })
+
+            // Stream caption segments to the client so the transcript is visible before Gemini starts
+            const BATCH = 8
+            for (let i = 0; i < captions.segments.length; i += BATCH) {
+              send('captions', { segments: captions.segments.slice(i, i + BATCH) })
+            }
+
             send('status', { message: '字幕已准备，开始生成中文排版稿…' })
             prompt = buildPrompt(captions)
           } catch (error) {
@@ -237,4 +248,49 @@ function jsonResponse(data: unknown, status = 200): Response {
 
 function toErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : '发生未知错误'
+}
+
+async function handleDebug(url: URL): Promise<Response> {
+  const videoId = url.searchParams.get('v') || 'Hrbq66XqtCo'
+
+  const INVIDIOUS = [
+    'https://yewtu.be',
+    'https://invidious.kavin.rocks',
+    'https://inv.nadeko.net',
+    'https://invidious.nerdvpn.de',
+  ]
+  const PIPED = [
+    'https://pipedapi.kavin.rocks',
+    'https://api.piped.yt',
+  ]
+
+  const timeout = (p: Promise<Response>, ms: number) =>
+    Promise.race([p, new Promise<Response>((_, r) => setTimeout(() => r(new Error(`timeout ${ms}ms`)), ms))])
+
+  const results: Record<string, unknown> = { videoId }
+
+  await Promise.all([
+    ...INVIDIOUS.map(async (inst) => {
+      const key = `invidious:${new URL(inst).hostname}`
+      try {
+        const r = await timeout(fetch(`${inst}/api/v1/captions/${videoId}`), 6000) as Response
+        const body = r.ok ? await r.json() : await r.text()
+        results[key] = { status: r.status, body }
+      } catch (e) {
+        results[key] = { error: toErrorMessage(e) }
+      }
+    }),
+    ...PIPED.map(async (api) => {
+      const key = `piped:${new URL(api).hostname}`
+      try {
+        const r = await timeout(fetch(`${api}/streams/${videoId}`), 8000) as Response
+        const body = r.ok ? await r.json() : await r.text()
+        results[key] = { status: r.status, subtitles: (body as any)?.subtitles?.length ?? body }
+      } catch (e) {
+        results[key] = { error: toErrorMessage(e) }
+      }
+    }),
+  ])
+
+  return jsonResponse(results)
 }

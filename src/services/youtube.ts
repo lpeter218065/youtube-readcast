@@ -17,17 +17,15 @@ const CAPTION_CACHE_TTL_MS = 12 * 60 * 60 * 1000
 
 const INVIDIOUS_INSTANCES = [
   'https://yewtu.be',
-  'https://invidious.kavin.rocks',
-  'https://inv.nadeko.net',
   'https://invidious.nerdvpn.de',
   'https://yt.artemislena.eu',
   'https://invidious.flokinet.to'
 ] as const
 
 const PIPED_APIS = [
-  'https://pipedapi.kavin.rocks',
   'https://api.piped.yt',
-  'https://pipedapi.reallyaweso.me'
+  'https://pipedapi.reallyaweso.me',
+  'https://pipedapi.kavin.rocks'
 ] as const
 
 const captionCache = new Map<
@@ -84,17 +82,33 @@ export async function fetchCaptions(
     return cachedPayload
   }
 
-  options.onStatus?.('尝试通过 youtube-transcript 获取字幕…')
-
   const errors: string[] = []
 
-  for (const language of [...PREFERRED_LANGUAGES, null] as Array<string | null>) {
+  // Step 1: inv.nadeko.net (known reliable), retry up to 3 times
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    throwIfAborted(options.signal)
+    options.onStatus?.(`尝试 inv.nadeko.net 获取字幕（第 ${attempt} 次）…`)
+    try {
+      const payload = await fetchCaptionsFromInvidiousSingle(videoId, 'https://inv.nadeko.net', options)
+      setCachedCaptions(videoId, payload)
+      return payload
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : '未知错误'
+      errors.push(msg)
+      options.onStatus?.(`inv.nadeko.net 第 ${attempt} 次失败：${msg}`)
+    }
+  }
+
+  // Step 2: YouTube direct via youtube-transcript
+  options.onStatus?.('inv.nadeko.net 多次失败，尝试 YouTube 直连…')
+  const languages = [...PREFERRED_LANGUAGES, null] as Array<string | null>
+  for (let i = 0; i < languages.length; i++) {
+    const language = languages[i]
     throwIfAborted(options.signal)
 
     try {
-      if (language) {
-        options.onStatus?.(`尝试字幕语言 ${language}…`)
-      }
+      const langLabel = language ?? '自动检测'
+      options.onStatus?.(`尝试字幕语言 ${langLabel}（${i + 1}/${languages.length}）…`)
 
       const transcript = (await withTimeout(
         fetchTranscript(videoId, language ? { lang: language } : {}),
@@ -107,6 +121,8 @@ export async function fetchCaptions(
         continue
       }
 
+      options.onStatus?.(`找到 ${langLabel} 字幕，正在处理…`)
+
       const normalized = transcript.map(normalizeTranscriptLine)
       const segments = mergeCaptionBlocks(normalized).map((item) => ({
         start: item.offset / 1000,
@@ -117,6 +133,7 @@ export async function fetchCaptions(
         continue
       }
 
+      options.onStatus?.('正在获取视频标题…')
       const payload: CaptionPayload = {
         title:
           (await fetchOEmbedTitle(videoId, options.signal)) ?? `YouTube Video ${videoId}`,
@@ -132,12 +149,14 @@ export async function fetchCaptions(
         continue
       }
 
-      errors.push(mapTranscriptError(videoId, error))
+      const msg = mapTranscriptError(videoId, error)
+      errors.push(msg)
+      options.onStatus?.(`YouTube 直连失败：${msg}`)
     }
   }
 
-  // Fallback: race Invidious and Piped in parallel
-  options.onStatus?.('尝试备用字幕源…')
+  // Step 3: parallel race of remaining Invidious instances + Piped
+  options.onStatus?.('尝试其他备用字幕镜像源…')
   try {
     const payload = await Promise.any([
       fetchCaptionsFromInvidious(videoId, options),
@@ -359,49 +378,57 @@ interface InvidiousCaption {
   url: string
 }
 
+async function fetchCaptionsFromInvidiousSingle(
+  videoId: string,
+  instance: string,
+  options: FetchCaptionsOptions
+): Promise<CaptionPayload> {
+  const host = new URL(instance).hostname
+
+  const listResp = await withTimeout(
+    fetch(`${instance}/api/v1/captions/${videoId}`, { signal: options.signal }),
+    6000
+  )
+  if (!listResp.ok) throw new Error(`${host} returned ${listResp.status}`)
+
+  const { captions = [] } = (await listResp.json()) as { captions?: InvidiousCaption[] }
+  if (!captions.length) throw new Error(`${host} 无字幕`)
+
+  const chosen =
+    captions.find((c) => c.language_code?.startsWith('zh')) ??
+    captions.find((c) => c.language_code?.startsWith('en')) ??
+    captions.find((c) => c.language_code)
+
+  if (!chosen) throw new Error(`${host} 无可用字幕轨道`)
+
+  const vttResp = await withTimeout(
+    fetch(`${instance}/api/v1/captions/${videoId}?label=${encodeURIComponent(chosen.label)}`, {
+      signal: options.signal
+    }),
+    6000
+  )
+  if (!vttResp.ok) throw new Error(`${host} VTT 下载失败`)
+
+  const segments = parseVtt(await vttResp.text())
+  if (!segments.length) throw new Error(`${host} VTT 解析为空`)
+
+  const title = (await fetchOEmbedTitle(videoId, options.signal)) ?? `YouTube Video ${videoId}`
+  return { title, language: chosen.language_code, source: 'invidious', segments }
+}
+
 async function fetchCaptionsFromInvidious(
   videoId: string,
   options: FetchCaptionsOptions
 ): Promise<CaptionPayload> {
   for (const instance of INVIDIOUS_INSTANCES) {
     throwIfAborted(options.signal)
-    options.onStatus?.(`尝试通过 Invidious (${new URL(instance).hostname}) 获取字幕…`)
+    const host = new URL(instance).hostname
+    options.onStatus?.(`尝试通过 Invidious (${host}) 获取字幕…`)
 
     try {
-      const listResp = await withTimeout(
-        fetch(`${instance}/api/v1/captions/${videoId}`, { signal: options.signal }),
-        6000
-      )
-      if (!listResp.ok) continue
-
-      const { captions = [] } = (await listResp.json()) as { captions?: InvidiousCaption[] }
-      if (!captions.length) continue
-
-      const chosen =
-        captions.find((c) => c.language_code.startsWith('zh')) ??
-        captions.find((c) => c.language_code.startsWith('en')) ??
-        captions[0]
-
-      if (!chosen) continue
-
-      const vttResp = await withTimeout(
-        fetch(
-          `${instance}/api/v1/captions/${videoId}?label=${encodeURIComponent(chosen.label)}`,
-          { signal: options.signal }
-        ),
-        6000
-      )
-      if (!vttResp.ok) continue
-
-      const vttText = await vttResp.text()
-      const segments = parseVtt(vttText)
-      if (!segments.length) continue
-
-      const title =
-        (await fetchOEmbedTitle(videoId, options.signal)) ?? `YouTube Video ${videoId}`
-
-      return { title, language: chosen.language_code, source: 'invidious', segments }
-    } catch {
+      return await fetchCaptionsFromInvidiousSingle(videoId, instance, options)
+    } catch (e) {
+      console.log(`[invidious] ${host} error: ${e instanceof Error ? e.message : e}`)
       continue
     }
   }
@@ -455,16 +482,22 @@ async function fetchCaptionsFromPiped(
 ): Promise<CaptionPayload> {
   for (const api of PIPED_APIS) {
     throwIfAborted(options.signal)
+    const host = new URL(api).hostname
+    options.onStatus?.(`尝试通过 Piped (${host}) 获取字幕…`)
 
     try {
+      const url = `${api}/streams/${videoId}`
+      console.log(`[piped] GET ${url}`)
       const resp = await withTimeout(
-        fetch(`${api}/streams/${videoId}`, { signal: options.signal }),
+        fetch(url, { signal: options.signal }),
         8000
       )
+      console.log(`[piped] ${api} status=${resp.status}`)
       if (!resp.ok) continue
 
       const data = (await resp.json()) as { subtitles?: PipedSubtitle[]; title?: string }
       const subtitles = data.subtitles ?? []
+      console.log(`[piped] ${api} subtitles=${subtitles.length}`)
       if (!subtitles.length) continue
 
       const chosen =
@@ -491,7 +524,8 @@ async function fetchCaptionsFromPiped(
         `YouTube Video ${videoId}`
 
       return { title, language: chosen.code, source: 'invidious', segments }
-    } catch {
+    } catch (e) {
+      console.log(`[piped] ${api} error: ${e instanceof Error ? e.message : e}`)
       continue
     }
   }

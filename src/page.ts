@@ -207,6 +207,14 @@ button:disabled { opacity: 0.38; cursor: not-allowed; }
   font-style: normal;
 }
 
+.caption-preview {
+  color: rgba(28,26,22,0.45);
+  font-family: 'SF Pro Text', -apple-system, sans-serif;
+  font-size: 14px;
+  line-height: 1.75;
+  white-space: pre-wrap;
+}
+
 .cursor {
   display: inline-block;
   width: 2px;
@@ -309,6 +317,7 @@ export function getPageHtml(): string {
           if (!response.ok) throw new Error(await response.text())
 
           let rawHtml = ''
+          let captionText = ''
           let progress = 20
           articleEl.innerHTML = '<span class="cursor"></span>'
 
@@ -316,10 +325,14 @@ export function getPageHtml(): string {
             if (data.error) throw new Error(data.error)
             if (data.event === 'status') {
               showStatus(data.payload.message, 'loading')
-              progress = Math.min(progress + 8, 88)
+              progress = Math.min(progress + 5, 85)
               showProgress(progress)
             } else if (data.event === 'meta') {
               showStatus('正在生成：' + data.payload.title, 'loading')
+            } else if (data.event === 'captions') {
+              const segs = data.payload.segments || []
+              for (const seg of segs) captionText += (captionText ? ' ' : '') + seg.text
+              articleEl.innerHTML = '<div class="caption-preview">' + captionText + '</div><span class="cursor"></span>'
             } else if (data.event === 'chunk') {
               rawHtml += data.payload.html || ''
               articleEl.innerHTML = rawHtml + '<span class="cursor"></span>'

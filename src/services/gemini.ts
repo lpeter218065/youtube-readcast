@@ -1,7 +1,11 @@
 const GEMINI_BASE =
   'https://generativelanguage.googleapis.com/v1beta/models/'
+const CLAUDE_BASE = 'https://cursor.scihub.edu.kg/api'
+const OPENAI_BASE = 'https://api.hanbbq.top/v1'
 
 const DEFAULT_MODEL = 'gemini-2.0-flash'
+const CLAUDE_MODEL = 'claude-3-5-sonnet-20241022'
+const OPENAI_MODEL = 'gpt-5.4'
 
 const SYSTEM_INSTRUCTION = `
 你是一位顶级中文商业与科技媒体编辑，擅长把播客、访谈、圆桌和长视频字幕，重写成高度可读的中文对话文章。
@@ -36,6 +40,19 @@ export interface GeminiOptions {
 
 export async function* streamGenerate(options: GeminiOptions): AsyncGenerator<string> {
   const { apiKey, prompt, signal, model } = options
+
+  // Use Claude if apiKey starts with 'cr_'
+  if (apiKey.startsWith('cr_')) {
+    yield* streamGenerateClaude({ apiKey, prompt, signal })
+    return
+  }
+
+  // Use OpenAI-compatible if apiKey starts with 'sk-'
+  if (apiKey.startsWith('sk-')) {
+    yield* streamGenerateOpenAI({ apiKey, prompt, signal })
+    return
+  }
+
   const endpoint = `${GEMINI_BASE}${model || DEFAULT_MODEL}:streamGenerateContent?alt=sse`
 
   const response = await fetch(endpoint, {
@@ -146,5 +163,136 @@ function extractTextFromSseEvent(rawEvent: string): string {
   }
 
   return output
+}
+
+async function* streamGenerateOpenAI(options: {
+  apiKey: string
+  prompt: string
+  signal?: AbortSignal
+}): AsyncGenerator<string> {
+  const { apiKey, prompt, signal } = options
+
+  const response = await fetch(`${OPENAI_BASE}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'authorization': `Bearer ${apiKey}`
+    },
+    body: JSON.stringify({
+      model: OPENAI_MODEL,
+      messages: [
+        { role: 'system', content: SYSTEM_INSTRUCTION },
+        { role: 'user', content: prompt }
+      ],
+      stream: true,
+      temperature: 0.8
+    }),
+    signal
+  })
+
+  if (!response.ok || !response.body) {
+    const errorText = await response.text()
+    throw new Error(`OpenAI API 请求失败 (${response.status}): ${errorText}`)
+  }
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+
+    buffer += decoder.decode(value, { stream: true })
+    const lines = buffer.split('\n')
+    buffer = lines.pop() ?? ''
+
+    for (const line of lines) {
+      if (!line.startsWith('data: ')) continue
+      const data = line.slice(6).trim()
+      if (!data || data === '[DONE]') continue
+
+      try {
+        const parsed = JSON.parse(data) as {
+          choices?: Array<{
+            delta?: { content?: string }
+          }>
+        }
+
+        const content = parsed.choices?.[0]?.delta?.content
+        if (content) {
+          yield content
+        }
+      } catch {
+        continue
+      }
+    }
+  }
+}
+
+async function* streamGenerateClaude(options: {
+  apiKey: string
+  prompt: string
+  signal?: AbortSignal
+}): AsyncGenerator<string> {
+  const { apiKey, prompt, signal } = options
+
+  const response = await fetch(`${CLAUDE_BASE}/v1/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'authorization': `Bearer ${apiKey}`
+    },
+    body: JSON.stringify({
+      model: CLAUDE_MODEL,
+      max_tokens: 8192,
+      temperature: 0.8,
+      messages: [
+        { role: 'system', content: SYSTEM_INSTRUCTION },
+        { role: 'user', content: prompt }
+      ],
+      stream: true
+    }),
+    signal
+  })
+
+  if (!response.ok || !response.body) {
+    const errorText = await response.text()
+    throw new Error(`Claude API 请求失败 (${response.status}): ${errorText}`)
+  }
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+
+    buffer += decoder.decode(value, { stream: true })
+    const lines = buffer.split('\n')
+    buffer = lines.pop() ?? ''
+
+    for (const line of lines) {
+      if (!line.startsWith('data: ')) continue
+      const data = line.slice(6).trim()
+      if (!data || data === '[DONE]') continue
+
+      try {
+        const parsed = JSON.parse(data) as {
+          choices?: Array<{
+            delta?: { content?: string }
+          }>
+        }
+
+        const content = parsed.choices?.[0]?.delta?.content
+        if (content) {
+          yield content
+        }
+      } catch {
+        continue
+      }
+    }
+  }
 }
 
