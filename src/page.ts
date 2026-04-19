@@ -116,7 +116,7 @@ button:disabled { opacity: 0.38; cursor: not-allowed; }
   transition: width .4s ease;
 }
 
-.article {
+.article, .dialogue-article {
   background: #faf7f2;
   border-radius: 16px;
   padding: 52px 56px;
@@ -127,7 +127,7 @@ button:disabled { opacity: 0.38; cursor: not-allowed; }
   min-height: 160px;
 }
 
-.article h1 {
+.article h1, .dialogue-article h1 {
   font-size: 24px;
   font-weight: 700;
   line-height: 1.3;
@@ -139,7 +139,7 @@ button:disabled { opacity: 0.38; cursor: not-allowed; }
   letter-spacing: -0.02em;
 }
 
-.article h2 {
+.article h2, .dialogue-article h2 {
   font-size: 15px;
   font-weight: 700;
   color: #2c2820;
@@ -150,7 +150,7 @@ button:disabled { opacity: 0.38; cursor: not-allowed; }
   opacity: 0.6;
 }
 
-.article h3 {
+.article h3, .dialogue-article h3 {
   font-size: 16px;
   font-weight: 600;
   color: #2c2820;
@@ -158,12 +158,12 @@ button:disabled { opacity: 0.38; cursor: not-allowed; }
   font-family: 'SF Pro Text', -apple-system, sans-serif;
 }
 
-.article p {
+.article p, .dialogue-article p {
   margin-bottom: 14px;
   color: #2e2a22;
 }
 
-.article .turn {
+.article .turn, .dialogue-article .turn {
   display: grid;
   grid-template-columns: 110px minmax(0, 1fr);
   gap: 20px;
@@ -171,9 +171,9 @@ button:disabled { opacity: 0.38; cursor: not-allowed; }
   border-top: 1px solid rgba(28,26,22,0.07);
 }
 
-.article .turn:first-of-type { border-top: 0; padding-top: 0; }
+.article .turn:first-of-type, .dialogue-article .turn:first-of-type { border-top: 0; padding-top: 0; }
 
-.article .speaker {
+.article .speaker, .dialogue-article .speaker {
   font-family: 'SF Pro Text', -apple-system, sans-serif;
   font-size: 11px;
   font-weight: 700;
@@ -183,9 +183,9 @@ button:disabled { opacity: 0.38; cursor: not-allowed; }
   padding-top: 5px;
 }
 
-.article .turn p { margin: 0; color: #2e2a22; }
+.article .turn p, .dialogue-article .turn p { margin: 0; color: #2e2a22; }
 
-.article blockquote {
+.article blockquote, .dialogue-article blockquote {
   margin: 28px 0;
   padding: 18px 22px;
   background: #fff8ee;
@@ -196,9 +196,59 @@ button:disabled { opacity: 0.38; cursor: not-allowed; }
   line-height: 1.8;
 }
 
-.article strong { color: #b5721e; font-weight: 700; }
+.article strong, .dialogue-article strong { color: #b5721e; font-weight: 700; }
 
-.article em { color: #5c4a1e; }
+.article em, .dialogue-article em { color: #5c4a1e; }
+
+.article-head, .dialogue-article .article-head {
+  margin-bottom: 32px;
+}
+
+.eyebrow {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: #c9893a;
+  margin-bottom: 12px;
+}
+
+.dek {
+  font-size: 15px;
+  line-height: 1.7;
+  color: #5c4a1e;
+  margin-top: 16px;
+}
+
+.chapter {
+  margin-top: 48px;
+}
+
+.chapter:first-of-type {
+  margin-top: 0;
+}
+
+.summary {
+  font-size: 14px;
+  line-height: 1.7;
+  color: #7a6a4e;
+  font-style: italic;
+  margin-bottom: 24px;
+}
+
+.pullquote {
+  margin: 32px 0;
+  padding: 24px 28px;
+  background: #fff8ee;
+  border-left: 4px solid #f5b041;
+  border-radius: 0 12px 12px 0;
+  color: #5c4a1e;
+  font-size: 17px;
+  line-height: 1.7;
+  font-style: italic;
+  font-weight: 500;
+}
 
 .placeholder-text {
   color: rgba(28,26,22,0.28);
@@ -293,7 +343,7 @@ export function getPageHtml(): string {
         const url = videoUrlInput.value.trim()
         if (!url) return showStatus('请输入 YouTube 视频链接。', 'error')
 
-        const apiKey = localStorage.getItem(STORAGE_KEY) || prompt('请输入 Gemini API Key:')
+        const apiKey = localStorage.getItem(STORAGE_KEY) || prompt('请输入 API Key:')
         if (!apiKey) return showStatus('需要 API Key 才能生成。', 'error')
 
         localStorage.setItem(STORAGE_KEY, apiKey)

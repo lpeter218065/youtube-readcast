@@ -1,11 +1,11 @@
 const GEMINI_BASE =
-  'https://generativelanguage.googleapis.com/v1beta/models/'
+  'https://once.novai.su/v1beta/models/'
 const CLAUDE_BASE = 'https://cursor.scihub.edu.kg/api'
-const OPENAI_BASE = 'https://api.hanbbq.top/v1'
+const OPENAI_BASE = 'https://us.novaiapi.com/v1'
 
-const DEFAULT_MODEL = 'gemini-2.0-flash'
+const DEFAULT_MODEL = 'gemini-2.5-pro'
 const CLAUDE_MODEL = 'claude-3-5-sonnet-20241022'
-const OPENAI_MODEL = 'gpt-5.4'
+const OPENAI_MODEL = 'gemini-3-pro-preview'
 
 const SYSTEM_INSTRUCTION = `
 你是一位顶级中文商业与科技媒体编辑，擅长把播客、访谈、圆桌和长视频字幕，重写成高度可读的中文对话文章。
