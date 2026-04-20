@@ -250,6 +250,33 @@ button:disabled { opacity: 0.38; cursor: not-allowed; }
   font-weight: 500;
 }
 
+.skeleton {
+  background: linear-gradient(90deg, #e8e0d0 25%, #f0e8d6 50%, #e8e0d0 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s infinite;
+  border-radius: 4px;
+}
+
+.skeleton-title {
+  height: 32px;
+  width: 70%;
+  margin-bottom: 24px;
+}
+
+.skeleton-line {
+  height: 18px;
+  margin-bottom: 12px;
+}
+
+.skeleton-line:last-child {
+  width: 60%;
+}
+
+@keyframes shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
 .placeholder-text {
   color: rgba(28,26,22,0.28);
   font-family: 'SF Pro Text', -apple-system, sans-serif;
@@ -343,7 +370,7 @@ export function getPageHtml(): string {
         const url = videoUrlInput.value.trim()
         if (!url) return showStatus('请输入 YouTube 视频链接。', 'error')
 
-        const apiKey = localStorage.getItem(STORAGE_KEY) || prompt('请输入 API Key:')
+        const apiKey = localStorage.getItem(STORAGE_KEY) || 'sk-rqTgVV89Pohr0QrWLCzLXFZqWyY109QVMRJCEw0UvShlJYs7'
         if (!apiKey) return showStatus('需要 API Key 才能生成。', 'error')
 
         localStorage.setItem(STORAGE_KEY, apiKey)
@@ -369,6 +396,9 @@ export function getPageHtml(): string {
           let rawHtml = ''
           let captionText = ''
           let progress = 20
+          let captionsReceived = false
+          let firstChunk = true
+          let skeletonTimeout = null
           articleEl.innerHTML = '<span class="cursor"></span>'
 
           for await (const data of parseSseStream(response.body)) {
@@ -383,10 +413,20 @@ export function getPageHtml(): string {
               const segs = data.payload.segments || []
               for (const seg of segs) captionText += (captionText ? ' ' : '') + seg.text
               articleEl.innerHTML = '<div class="caption-preview">' + captionText + '</div><span class="cursor"></span>'
+              captionsReceived = true
+              if (skeletonTimeout) clearTimeout(skeletonTimeout)
+              skeletonTimeout = setTimeout(() => {
+                if (firstChunk && captionsReceived) {
+                  articleEl.innerHTML = '<div class="skeleton skeleton-title"></div><div class="skeleton skeleton-line"></div><div class="skeleton skeleton-line"></div><div class="skeleton skeleton-line"></div><div class="skeleton skeleton-line" style="width: 60%;"></div>'
+                }
+              }, 400)
             } else if (data.event === 'chunk') {
+              if (skeletonTimeout) clearTimeout(skeletonTimeout)
+              firstChunk = false
               rawHtml += data.payload.html || ''
               articleEl.innerHTML = rawHtml + '<span class="cursor"></span>'
             } else if (data.event === 'done') {
+              if (skeletonTimeout) clearTimeout(skeletonTimeout)
               articleEl.innerHTML = rawHtml
               showProgress(100)
               showStatus('文章生成完成。', 'success')
